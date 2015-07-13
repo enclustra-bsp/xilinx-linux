@@ -2,4 +2,4 @@
 # Makefile for the Atmel network device drivers.
 #
 
-obj-$(CONFIG_MACB) += macb.o
+obj-$(CONFIG_MACB) += macb.o macb_mdio.o
