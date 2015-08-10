@@ -620,6 +620,7 @@ dtb-$(CONFIG_ARCH_ZYNQ) += \
 	zynq-mars-zx3-nand.dtb \
 	zynq-mars-zx3-eb1.dtb \
 	zynq-mercury-zx1.dtb \
+	zynq-mercury-zx1-mmc.dtb \
 	zynq-mercury-zx5.dtb \
 	zynq-zed.dtb \
 	zynq-zybo.dtb
