@@ -616,12 +616,16 @@ dtb-$(CONFIG_ARCH_ZYNQ) += \
 	zynq-zc770-xm012.dtb \
 	zynq-zc770-xm013.dtb \
 	zynq-mars-zx2.dtb \
+	zynq-mars-zx2-mmc.dtb \
 	zynq-mars-zx3.dtb \
+	zynq-mars-zx3-mmc.dtb \
 	zynq-mars-zx3-nand.dtb \
 	zynq-mars-zx3-eb1.dtb \
+	zynq-mars-zx3-eb1-mmc.dtb \
 	zynq-mercury-zx1.dtb \
 	zynq-mercury-zx1-mmc.dtb \
 	zynq-mercury-zx5.dtb \
+	zynq-mercury-zx5-mmc.dtb \
 	zynq-zed.dtb \
 	zynq-zybo.dtb
 dtb-$(CONFIG_MACH_ARMADA_370) += \
