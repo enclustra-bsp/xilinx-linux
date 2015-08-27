@@ -35,41 +35,42 @@
 	};
 };
 
-&qspi {
+&smcc {
 	status = "okay";
-	is-dual = <0>;
-	num-cs = <1>;
-	flash@0 {
-		compatible = "n25q128a11";
-		reg = <0x0>;
-		spi-tx-bus-width = <1>;
-		spi-rx-bus-width = <4>;
-		spi-max-frequency = <50000000>;
-		#address-cells = <1>;
-		#size-cells = <1>;
-		partition@qspi-fsbl-uboot {
-			label = "qspi-fsbl-uboot";
-			reg = <0x0 0x100000>;
-		};
-		partition@qspi-linux {
-			label = "qspi-linux";
-			reg = <0x100000 0x500000>;
-		};
-		partition@qspi-device-tree {
-			label = "qspi-device-tree";
-			reg = <0x600000 0x20000>;
-		};
-		partition@qspi-rootfs {
-			label = "qspi-rootfs";
-			reg = <0x620000 0x5E0000>;
-		};
-		partition@qspi-bitstream {
-			label = "qspi-bitstream";
-			reg = <0xC00000 0x400000>;
-		};
-	};
+	arm,addr25 = <0x0>;
+	arm,nor-chip-sel0 = <0x0>;
+	arm,nor-chip-sel1 = <0x0>;
+	arm,sram-chip-sel0 = <0x0>;
+	arm,sram-chip-sel1 = <0x0>;
 };
 
+&nand0 {
+	status = "okay";
+	arm,nand-cycle-t0 = <0x4>;
+	arm,nand-cycle-t1 = <0x4>;
+	arm,nand-cycle-t2 = <0x1>;
+	arm,nand-cycle-t3 = <0x2>;
+	arm,nand-cycle-t4 = <0x2>;
+	arm,nand-cycle-t5 = <0x2>;
+	arm,nand-cycle-t6 = <0x4>;
+
+	partition@nand-linux {
+		label = "nand-linux";
+		reg = <0x0 0x500000>;
+	};
+	partition@nand-device-tree {
+		label = "nand-device-tree";
+		reg = <0x500000 0x100000>;
+	};
+	partition@nand-bootscript {
+		label = "nand-bootscript";
+		reg = <0x600000 0x100000>;
+	};
+	partition@nand-rootfs {
+		label = "nand-rootfs";
+		reg = <0x700000 0x1f900000>;
+	};
+};
 &usb0 {
 	status = "okay";
 	dr_mode = "host";
