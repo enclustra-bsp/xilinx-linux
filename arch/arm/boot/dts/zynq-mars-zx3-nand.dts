@@ -31,7 +31,7 @@
 	};
 
 	chosen {
-		bootargs = "console=ttyPS0,115200 root=/dev/mtdblock3 rw rootfstype=jffs2 earlyprintk";
+		bootargs = "console=ttyPS0,115200 rootwait=1 ubi.mtd=3 rootfstype=ubifs root=ubi0:rootfs rw earlyprintk";
 		linux,stdout-path = "/amba/serial@e0001000";
 	};
 };
