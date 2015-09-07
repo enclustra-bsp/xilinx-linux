@@ -13,6 +13,7 @@
  */
 /dts-v1/;
 /include/ "zynq-7000.dtsi"
+/include/ "zynq-enclustra-nand-parts.dtsi"
 
 / {
 	model = "Enclustra Mercury ZX5 SOM";
@@ -35,42 +36,6 @@
 	};
 };
 
-&smcc {
-	status = "okay";
-	arm,addr25 = <0x0>;
-	arm,nor-chip-sel0 = <0x0>;
-	arm,nor-chip-sel1 = <0x0>;
-	arm,sram-chip-sel0 = <0x0>;
-	arm,sram-chip-sel1 = <0x0>;
-};
-
-&nand0 {
-	status = "okay";
-	arm,nand-cycle-t0 = <0x4>;
-	arm,nand-cycle-t1 = <0x4>;
-	arm,nand-cycle-t2 = <0x1>;
-	arm,nand-cycle-t3 = <0x2>;
-	arm,nand-cycle-t4 = <0x2>;
-	arm,nand-cycle-t5 = <0x2>;
-	arm,nand-cycle-t6 = <0x4>;
-
-	partition@nand-linux {
-		label = "nand-linux";
-		reg = <0x0 0x500000>;
-	};
-	partition@nand-device-tree {
-		label = "nand-device-tree";
-		reg = <0x500000 0x100000>;
-	};
-	partition@nand-bootscript {
-		label = "nand-bootscript";
-		reg = <0x600000 0x100000>;
-	};
-	partition@nand-rootfs {
-		label = "nand-rootfs";
-		reg = <0x700000 0x1f900000>;
-	};
-};
 &usb0 {
 	status = "okay";
 	dr_mode = "host";
