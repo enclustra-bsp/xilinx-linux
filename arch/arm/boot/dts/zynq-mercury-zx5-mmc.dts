@@ -13,7 +13,7 @@
  */
 /dts-v1/;
 /include/ "zynq-7000.dtsi"
-/include/ "zynq-enclustra-qspi-parts.dtsi"
+/include/ "zynq-enclustra-qspi64-parts.dtsi"
 
 / {
 	model = "Enclustra Mercury ZX5 SOM";
