@@ -105,3 +105,7 @@ all.config
 
 # Kdevelop4
 *.kdev4
+
+# Enclustra buildscripts related files
+postfetch.sh
+postbuild.sh
