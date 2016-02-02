@@ -16,12 +16,12 @@
 /include/ "zynq-enclustra-qspi-parts.dtsi"
 
 / {
-	model = "Enclustra Mars ZX3 SOM on EB1";
+	model = "Enclustra Mars ZX3 SOM";
 	compatible = "xlnx,zynq-7000";
 
 	aliases {
 		ethernet0 = &gem0;
-		serial0 = &uart0;
+		serial0 = &uart1;
 	};
 
 	memory {
@@ -30,7 +30,7 @@
 	};
 
 	chosen {
-		linux,stdout-path = "/amba/serial@e0000000";
+		linux,stdout-path = "/amba/serial@e0001000";
 	};
 };
 
@@ -56,6 +56,6 @@
 	wp-inverted = <0x1>;
 };
 
-&uart0 {
+&uart1 {
 	status = "okay";
 };
