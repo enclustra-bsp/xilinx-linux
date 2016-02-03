@@ -60,3 +60,11 @@
 &uart0 {
 	status = "okay";
 };
+
+&i2c0 {
+	status = "okay";
+	isl12022: isl12022@68 {
+		compatible = "isil,isl12022";
+		reg = <0x6f>;
+	};
+};
