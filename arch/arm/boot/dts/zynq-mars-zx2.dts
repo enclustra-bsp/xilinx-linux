@@ -59,3 +59,11 @@
 &uart0 {
 	status = "okay";
 };
+
+&i2c0 {
+	status = "okay";
+	pcf85063: pcf85063@51 {
+		compatible = "nxp,pcf85063";
+		reg = <0x51>;
+	};
+};
