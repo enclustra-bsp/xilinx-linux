@@ -7,6 +7,14 @@
 	chosen {
 		linux,stdout-path = "/amba/serial@e0000000";
 	};
+
+	usb_phy0: phy0 {
+		compatible = "ulpi-phy";
+		#phy-cells = <0>;
+		reg = <0xe0002000 0x1000>;
+		view-port = <0x0170>;
+		drv-vbus;
+	};
 };
 
 &gem0 {
@@ -28,7 +36,7 @@
 &usb0 {
 	status = "okay";
 	dr_mode = "host";
-	phy_type = "ulpi";
+	usb-phy = <&usb_phy0>;
 };
 
 &i2c0 {
