@@ -57,6 +57,18 @@ config COMMON_CLK_SCPI
 	  This driver uses SCPI Message Protocol to interact with the
 	  firmware providing all the clock controls.
 
+config COMMON_CLK_SI5338
+	tristate "Clock driver for SiLabs 5338"
+	depends on I2C
+	select REGMAP_I2C
+	select RATIONAL
+	---help---
+	  This driver supports Silicon Labs 5338 programmable clock generators,
+	  using common clock framework. It needs parent clock as input(s).
+	  Internal clocks are registered with unique names in case multiple
+	  devices exist. See devicetree/bindings/clock/silabs,si5338.txt
+	  under Documentation for details.
+
 config COMMON_CLK_SI5351
 	tristate "Clock driver for SiLabs 5351A/B/C"
 	depends on I2C

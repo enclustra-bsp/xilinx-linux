@@ -1,0 +1,192 @@
+Binding for Silicon Labs Si5338 programmable i2c clock generator.
+
+Reference
+[1] Si5338 Data Sheet
+    http://www.silabs.com/Support%20Documents/TechnicalDocs/Si5338.pdf
+
+The Si5338 is a programmable i2c clock generators with up to 4 output
+clocks. It has 4 sets of possible input clocks
+
+IN1/IN2: differential
+IN3: single-ended
+IN4: single-ended
+IN5/IN6: differential
+
+Additionally, IN1/IN2 can be used as XTAL with different setting.
+The clock tree looks like below (without support of zero-delay)
+
+
+      IN1/IN2 IN3         IN4 IN5/IN6
+         |     |           |     |
+   ------|     |           |     |
+   |     |     |           |     |
+   |     \     /           \     /
+   |      \   /             \   /
+   |       \ /               \ /
+ XTAL     REFCLK            FBCLK
+   |       |  \             /   |
+   |       |   \           /    |
+   |       | DIVREFCLK DIVFBCLK |
+   |       |     \       /      |
+   |       |      \     /       |
+   |       |       \   /        |
+   |       |        PLL         |
+   |       |      / | | \       |
+   |       |     /  / \  \      |
+   |       |    /  /   \  \     |
+   |       |   /   |   |   \    |
+   |       |   |   |   |   |    |
+   |       |  MS0 MS1 MS2 MS3   |
+   |       |   |   |   |   |    |
+
+       OUT0  OUT1  OUT2  OUT3
+
+The output clock can choose from any of the above clock as its source, with
+exceptions: MS1 can only be used for OUT1, MS2 can only be used for OUT2, MS3
+can only be used for OUT3.
+
+==I2C device node==
+
+Required properties:
+- compatible: shall be "silabs,si5338".
+- reg: i2c device address, shall be 0x60, 0x61, 0x70, or 0x71
+- #clock-cells: shall be set to 1 for multiple outputs
+- clocks: list of parent clocks in the order of <xtal>, <in1/2>, <in3>, <in4>,
+	 <in5/6>.
+	Note, xtal and in1/2 are mutually exclusive. Only one can be set.
+- clock-names: The name of the clocks in the same order.
+- #address-cells: shall be set to 1.
+- #size-cells: shall be set to 0.
+- silabs,pll-master: If PLL is used, pick one MS (0, 1, 2, or 3) to allow
+	chaning PLL rate. This is arbitrary since MS0/1/2/3 share one PLL.
+	PLL can be calculated backward to satisfy MS. This node is not
+	required if PLL is not used, or if silabs,pll-vco is set.
+
+Optional properties if not set by platform driver:
+- silab,name-prefix: name prefix for si5338
+        If multiple si5338 chips exist, use name-prefix to form unique names.
+	If omitted, i2c bus name will be used as the prefix.
+- silab,ref-source: source of refclk, valid value is defined as
+	#define SI5338_REF_SRC_CLKIN12          0
+	#define SI5338_REF_SRC_CLKIN3           1
+	#define SI5338_REF_SRC_XTAL             4
+- silab,fb-source:  source of fbclk, valid value is defined as
+	#define SI5338_FB_SRC_CLKIN4            2
+	#define SI5338_FB_SRC_CLKIN56           3
+	#define SI5338_FB_SRC_NOCLK             5
+- silabs,pll-source: source of pll, valid value is defined as
+	#define SI5338_PFD_IN_REF_REFCLK           0
+	#define SI5338_PFD_IN_REF_FBCLK            1
+	#define SI5338_PFD_IN_REF_DIVREFCLK        2
+	#define SI5338_PFD_IN_REF_DIVFBCLK         3
+	#define SI5338_PFD_IN_REF_XOCLK            4
+	#define SI5338_PFD_IN_REF_NOCLK            5
+- silabs,pll-vco: Specify VCO frequency for optimal ratios for all outputs.
+	If specified, silabs,pll-master is ignored.
+
+==Child nodes==
+
+Each of the clock outputs can be configured individually by
+using a child node to the I2C device node. If a child node for a clock
+output is not set, platform driver has to set up.
+
+Required child node properties:
+- name: name for the child node
+        It has to be unique. The name prefix is ignored.
+	If using platform data and the name is not specificed,
+        clkout0/1/2/3 will be used with name prefix.
+- reg: number of clock output.
+
+Optional child node properties:
+- silabs,drive-config: the configuration of output driver
+  The valid value list is long. Please refer to soruce code.
+- silabs,clock-source: source clock of the output divider
+	#define SI5338_OUT_MUX_FBCLK            0
+	#define SI5338_OUT_MUX_REFCLK           1
+	#deinfe SI5338_OUT_MUX_DIVFBCLK         2
+	#deinfe SI5338_OUT_MUX_DIVREFCLK        3
+	#deinfe SI5338_OUT_MUX_XOCLK            4
+	#deinfe SI5338_OUT_MUX_MS0              5
+	#deinfe SI5338_OUT_MUX_MSN              6 /* MS0/1/2/3 */
+	#deinfe SI5338_OUT_MUX_NOCLK            7
+- silabs,disable-state : clock output disable state, shall be
+	#define SI5338_OUT_DIS_HIZ              0
+	#define SI5338_OUT_DIS_LOW              1
+	#define SI5338_OUT_DIS_HI               2
+	#define SI5338_OUT_DIS_ALWAYS_ON        3
+- enabled: the output is enabled by default
+	The existence of this node enables the output when the driver is loaded
+	otherwise the clock is only enabled when used
+
+==Example==
+
+/* 25MHz reference crystal */
+ref25: ref25M {
+	compatible = "fixed-clock";
+	#clock-cells = <0>;
+	clock-frequency = <25000000>;
+};
+clkin56: ref100M {
+	compatible = "fixed-clock";
+	#clock-cells = <0>;
+	clock-frequency = <100000000>;
+};
+i2c-master-node {
+	si5338: clock-generator@70 {
+		compatible = "silabs,si5338";
+		reg = <0x70>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		#clock-cells = <1>;
+
+		/* connect xtal to 25MHz, in5/in6 to 100MHz */
+		clocks = <&ref25>, <0>, <0>, <0>, <&clkin56>;
+		clock-names = "xtal", "in12", "in3", "in4", "in56";
+
+		/* connect xtal as source of refclk */
+		silab,ref-source = <SI5338_REF_SRC_XTAL>;
+
+		/* connect in5/in6 as source of fbclk */
+		silab,fb-source = <SI5338_FB_SRC_CLKIN56>;
+
+		/* connect divrefclk as source of pll */
+		silab,pll-source = <SI5338_PFD_IN_REF_DIVREFCLK>;
+
+		/* Choose one MS for pll master */
+		silabs,pll-master = <0>;
+
+		/* Specify pll-vco frequency. pll-master is ignored. */
+		silabs,pll-vco = <2450000000>;
+
+		/* output */
+		clkout0 {
+			reg = <0>;
+			silabs,drive-config = "1V8_LVDS";
+			silabs,clock-source = <SI5338_OUT_MUX_MS0>;
+			silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
+			clock-frequency = <125000000>;
+		};
+		clkout1 {
+			reg = <1>;
+			silabs,drive-config = "1V8_LVDS";
+			silabs,clock-source = <SI5338_OUT_MUX_MSN>;
+			silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
+			clock-frequency = <125000000>;
+		};
+		clkout2 {
+			reg = <2>;
+			silabs,drive-config = "1V8_LVDS";
+			silabs,clock-source = <SI5338_OUT_MUX_MSN>;
+			silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
+			clock-frequency = <125000000>;
+		};
+		clkout3 {
+			reg = <3>;
+			silabs,drive-config = "1V8_LVDS";
+			silabs,clock-source = <SI5338_OUT_MUX_MSN>;
+			silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
+			clock-frequency = <125000000>;
+		};
+
+	};
+};
