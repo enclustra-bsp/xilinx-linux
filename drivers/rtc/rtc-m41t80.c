@@ -13,6 +13,8 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/bcd.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
@@ -174,7 +176,13 @@ static int m41t80_set_datetime(struct i2c_client *client, struct rtc_time *tm)
 		bin2bcd(tm->tm_mday) | (buf[M41T80_REG_DAY] & ~0x3f);
 	buf[M41T80_REG_MON] =
 		bin2bcd(tm->tm_mon + 1) | (buf[M41T80_REG_MON] & ~0x1f);
+
 	/* assume 20YY not 19YY */
+	if (tm->tm_year < 100 || tm->tm_year > 199) {
+		dev_err(&client->dev, "Year must be between 2000 and 2099. It's %d.\n",
+			tm->tm_year + 1900);
+		return -EINVAL;
+	}
 	buf[M41T80_REG_YEAR] = bin2bcd(tm->tm_year % 100);
 
 	if (i2c_transfer(client->adapter, msgs, 1) != 1) {
@@ -513,12 +521,12 @@ static int wdt_ioctl(struct file *file, unsigned int cmd,
 			return -EFAULT;
 
 		if (rv & WDIOS_DISABLECARD) {
-			pr_info("rtc-m41t80: disable watchdog\n");
+			pr_info("disable watchdog\n");
 			wdt_disable();
 		}
 
 		if (rv & WDIOS_ENABLECARD) {
-			pr_info("rtc-m41t80: enable watchdog\n");
+			pr_info("enable watchdog\n");
 			wdt_ping();
 		}
 

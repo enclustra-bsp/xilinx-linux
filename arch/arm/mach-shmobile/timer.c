@@ -18,6 +18,8 @@
 #include <linux/delay.h>
 #include <linux/of_address.h>
 
+#include "common.h"
+
 static void __init shmobile_setup_delay_hz(unsigned int max_cpu_core_hz,
 					   unsigned int mult, unsigned int div)
 {
@@ -38,8 +40,7 @@ static void __init shmobile_setup_delay_hz(unsigned int max_cpu_core_hz,
 void __init shmobile_init_delay(void)
 {
 	struct device_node *np, *cpus;
-	bool is_a7_a8_a9 = false;
-	bool is_a15 = false;
+	unsigned int div = 0;
 	bool has_arch_timer = false;
 	u32 max_freq = 0;
 
@@ -53,60 +54,22 @@ void __init shmobile_init_delay(void)
 		if (!of_property_read_u32(np, "clock-frequency", &freq))
 			max_freq = max(max_freq, freq);
 
-		if (of_device_is_compatible(np, "arm,cortex-a8") ||
-		    of_device_is_compatible(np, "arm,cortex-a9")) {
-			is_a7_a8_a9 = true;
-		} else if (of_device_is_compatible(np, "arm,cortex-a7")) {
-			is_a7_a8_a9 = true;
-			has_arch_timer = true;
-		} else if (of_device_is_compatible(np, "arm,cortex-a15")) {
-			is_a15 = true;
+		if (of_device_is_compatible(np, "arm,cortex-a8")) {
+			div = 2;
+		} else if (of_device_is_compatible(np, "arm,cortex-a9")) {
+			div = 1;
+		} else if (of_device_is_compatible(np, "arm,cortex-a7") ||
+			 of_device_is_compatible(np, "arm,cortex-a15")) {
+			div = 1;
 			has_arch_timer = true;
 		}
 	}
 
 	of_node_put(cpus);
 
-	if (!max_freq)
+	if (!max_freq || !div)
 		return;
 
-#ifdef CONFIG_ARCH_SHMOBILE_LEGACY
-	/* Non-multiplatform r8a73a4 SoC cannot use arch timer due
-	 * to GIC being initialized from C and arch timer via DT */
-	if (of_machine_is_compatible("renesas,r8a73a4"))
-		has_arch_timer = false;
-
-	/* Non-multiplatform r8a7790 SoC cannot use arch timer due
-	 * to GIC being initialized from C and arch timer via DT */
-	if (of_machine_is_compatible("renesas,r8a7790"))
-		has_arch_timer = false;
-#endif
-
-	if (!has_arch_timer || !IS_ENABLED(CONFIG_ARM_ARCH_TIMER)) {
-		if (is_a7_a8_a9)
-			shmobile_setup_delay_hz(max_freq, 1, 3);
-		else if (is_a15)
-			shmobile_setup_delay_hz(max_freq, 2, 4);
-	}
+	if (!has_arch_timer || !IS_ENABLED(CONFIG_ARM_ARCH_TIMER))
+		shmobile_setup_delay_hz(max_freq, 1, div);
 }
-
-static void __init shmobile_late_time_init(void)
-{
-	/*
-	 * Make sure all compiled-in early timers register themselves.
-	 *
-	 * Run probe() for two "earlytimer" devices, these will be the
-	 * clockevents and clocksource devices respectively. In the event
-	 * that only a clockevents device is available, we -ENODEV on the
-	 * clocksource and the jiffies clocksource is used transparently
-	 * instead. No error handling is necessary here.
-	 */
-	early_platform_driver_register_all("earlytimer");
-	early_platform_driver_probe("earlytimer", 2, 0);
-}
-
-void __init shmobile_earlytimer_init(void)
-{
-	late_time_init = shmobile_late_time_init;
-}
-

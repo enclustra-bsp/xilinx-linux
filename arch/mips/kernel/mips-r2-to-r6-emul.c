@@ -22,6 +22,7 @@
 #include <asm/asm.h>
 #include <asm/branch.h>
 #include <asm/break.h>
+#include <asm/debug.h>
 #include <asm/fpu.h>
 #include <asm/fpu_emulator.h>
 #include <asm/inst.h>
@@ -187,7 +188,7 @@ static inline int mipsr6_emul(struct pt_regs *regs, u32 ir)
 }
 
 /**
- * movt_func - Emulate a MOVT instruction
+ * movf_func - Emulate a MOVF instruction
  * @regs: Process register set
  * @ir: Instruction
  *
@@ -200,9 +201,12 @@ static int movf_func(struct pt_regs *regs, u32 ir)
 
 	csr = current->thread.fpu.fcr31;
 	cond = fpucondbit[MIPSInst_RT(ir) >> 2];
+
 	if (((csr & cond) == 0) && MIPSInst_RD(ir))
 		regs->regs[MIPSInst_RD(ir)] = regs->regs[MIPSInst_RS(ir)];
+
 	MIPS_R2_STATS(movs);
+
 	return 0;
 }
 
@@ -895,8 +899,9 @@ static inline int mipsr2_find_op_func(struct pt_regs *regs, u32 inst,
  * mipsr2_decoder: Decode and emulate a MIPS R2 instruction
  * @regs: Process register set
  * @inst: Instruction to decode and emulate
+ * @fcr31: Floating Point Control and Status Register returned
  */
-int mipsr2_decoder(struct pt_regs *regs, u32 inst)
+int mipsr2_decoder(struct pt_regs *regs, u32 inst, unsigned long *fcr31)
 {
 	int err = 0;
 	unsigned long vaddr;
@@ -935,42 +940,42 @@ repeat:
 		switch (rt) {
 		case tgei_op:
 			if ((long)regs->regs[rs] >= MIPSInst_SIMM(inst))
-				do_trap_or_bp(regs, 0, "TGEI");
+				do_trap_or_bp(regs, 0, 0, "TGEI");
 
 			MIPS_R2_STATS(traps);
 
 			break;
 		case tgeiu_op:
 			if (regs->regs[rs] >= MIPSInst_UIMM(inst))
-				do_trap_or_bp(regs, 0, "TGEIU");
+				do_trap_or_bp(regs, 0, 0, "TGEIU");
 
 			MIPS_R2_STATS(traps);
 
 			break;
 		case tlti_op:
 			if ((long)regs->regs[rs] < MIPSInst_SIMM(inst))
-				do_trap_or_bp(regs, 0, "TLTI");
+				do_trap_or_bp(regs, 0, 0, "TLTI");
 
 			MIPS_R2_STATS(traps);
 
 			break;
 		case tltiu_op:
 			if (regs->regs[rs] < MIPSInst_UIMM(inst))
-				do_trap_or_bp(regs, 0, "TLTIU");
+				do_trap_or_bp(regs, 0, 0, "TLTIU");
 
 			MIPS_R2_STATS(traps);
 
 			break;
 		case teqi_op:
 			if (regs->regs[rs] == MIPSInst_SIMM(inst))
-				do_trap_or_bp(regs, 0, "TEQI");
+				do_trap_or_bp(regs, 0, 0, "TEQI");
 
 			MIPS_R2_STATS(traps);
 
 			break;
 		case tnei_op:
 			if (regs->regs[rs] != MIPSInst_SIMM(inst))
-				do_trap_or_bp(regs, 0, "TNEI");
+				do_trap_or_bp(regs, 0, 0, "TNEI");
 
 			MIPS_R2_STATS(traps);
 
@@ -1165,6 +1170,13 @@ fpu_emul:
 
 		err = fpu_emulator_cop1Handler(regs, &current->thread.fpu, 0,
 					       &fault_addr);
+		*fcr31 = current->thread.fpu.fcr31;
+
+		/*
+		 * We can't allow the emulated instruction to leave any of
+		 * the cause bits set in $fcr31.
+		 */
+		current->thread.fpu.fcr31 &= ~FPU_CSR_ALL_X;
 
 		/*
 		 * this is a tricky issue - lose_fpu() uses LL/SC atomics
@@ -2352,7 +2364,6 @@ static const struct file_operations mipsr2_clear_fops = {
 
 static int __init mipsr2_init_debugfs(void)
 {
-	extern struct dentry	*mips_debugfs_dir;
 	struct dentry		*mipsr2_emul;
 
 	if (!mips_debugfs_dir)

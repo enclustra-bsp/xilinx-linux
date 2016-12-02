@@ -23,6 +23,7 @@
 #include <linux/spinlock.h>
 #include <linux/mm.h>
 #include <linux/fs.h>
+#include <linux/dax.h>
 #include <linux/buffer_head.h>
 #include <linux/uio.h>
 #include <linux/list_lru.h>
@@ -131,6 +132,7 @@ struct xfs_buf_map {
 	struct xfs_buf_map (map) = { .bm_bn = (blkno), .bm_len = (numblk) };
 
 struct xfs_buf_ops {
+	char *name;
 	void (*verify_read)(struct xfs_buf *);
 	void (*verify_write)(struct xfs_buf *);
 };
@@ -299,7 +301,8 @@ extern void xfs_buf_iomove(xfs_buf_t *, size_t, size_t, void *,
 	    xfs_buf_iomove((bp), (off), (len), NULL, XBRW_ZERO)
 
 /* Buffer Utility Routines */
-extern xfs_caddr_t xfs_buf_offset(xfs_buf_t *, size_t);
+extern void *xfs_buf_offset(struct xfs_buf *, size_t);
+extern void xfs_buf_stale(struct xfs_buf *bp);
 
 /* Delayed Write Buffer Routines */
 extern bool xfs_buf_delwri_queue(struct xfs_buf *, struct list_head *);
@@ -309,31 +312,6 @@ extern int xfs_buf_delwri_submit_nowait(struct list_head *);
 /* Buffer Daemon Setup Routines */
 extern int xfs_buf_init(void);
 extern void xfs_buf_terminate(void);
-
-#define XFS_BUF_ZEROFLAGS(bp) \
-	((bp)->b_flags &= ~(XBF_READ|XBF_WRITE|XBF_ASYNC| \
-			    XBF_SYNCIO|XBF_FUA|XBF_FLUSH| \
-			    XBF_WRITE_FAIL))
-
-void xfs_buf_stale(struct xfs_buf *bp);
-#define XFS_BUF_UNSTALE(bp)	((bp)->b_flags &= ~XBF_STALE)
-#define XFS_BUF_ISSTALE(bp)	((bp)->b_flags & XBF_STALE)
-
-#define XFS_BUF_DONE(bp)	((bp)->b_flags |= XBF_DONE)
-#define XFS_BUF_UNDONE(bp)	((bp)->b_flags &= ~XBF_DONE)
-#define XFS_BUF_ISDONE(bp)	((bp)->b_flags & XBF_DONE)
-
-#define XFS_BUF_ASYNC(bp)	((bp)->b_flags |= XBF_ASYNC)
-#define XFS_BUF_UNASYNC(bp)	((bp)->b_flags &= ~XBF_ASYNC)
-#define XFS_BUF_ISASYNC(bp)	((bp)->b_flags & XBF_ASYNC)
-
-#define XFS_BUF_READ(bp)	((bp)->b_flags |= XBF_READ)
-#define XFS_BUF_UNREAD(bp)	((bp)->b_flags &= ~XBF_READ)
-#define XFS_BUF_ISREAD(bp)	((bp)->b_flags & XBF_READ)
-
-#define XFS_BUF_WRITE(bp)	((bp)->b_flags |= XBF_WRITE)
-#define XFS_BUF_UNWRITE(bp)	((bp)->b_flags &= ~XBF_WRITE)
-#define XFS_BUF_ISWRITE(bp)	((bp)->b_flags & XBF_WRITE)
 
 /*
  * These macros use the IO block map rather than b_bn. b_bn is now really

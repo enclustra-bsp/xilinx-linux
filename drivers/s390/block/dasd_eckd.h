@@ -355,7 +355,8 @@ struct dasd_gneq {
 		__u8 identifier:2;
 		__u8 reserved:6;
 	} __attribute__ ((packed)) flags;
-	__u8 reserved[5];
+	__u8 record_selector;
+	__u8 reserved[4];
 	struct {
 		__u8 value:2;
 		__u8 number:6;
@@ -492,10 +493,18 @@ struct alias_pav_group {
 	struct dasd_device *next;
 };
 
+struct dasd_conf_data {
+	struct dasd_ned neds[5];
+	u8 reserved[64];
+	struct dasd_gneq gneq;
+} __packed;
+
 struct dasd_eckd_private {
 	struct dasd_eckd_characteristics rdc_data;
 	u8 *conf_data;
 	int conf_len;
+	/* per path configuration data */
+	struct dasd_conf_data *path_conf_data[8];
 	/* pointers to specific parts in the conf_data */
 	struct dasd_ned *ned;
 	struct dasd_sneq *sneq;
@@ -516,6 +525,7 @@ struct dasd_eckd_private {
 	int count;
 
 	u32 fcx_max_data;
+	char suc_reason;
 };
 
 
@@ -525,7 +535,7 @@ void dasd_alias_disconnect_device_from_lcu(struct dasd_device *);
 int dasd_alias_add_device(struct dasd_device *);
 int dasd_alias_remove_device(struct dasd_device *);
 struct dasd_device *dasd_alias_get_start_dev(struct dasd_device *);
-void dasd_alias_handle_summary_unit_check(struct dasd_device *, struct irb *);
+void dasd_alias_handle_summary_unit_check(struct work_struct *);
 void dasd_eckd_reset_ccw_to_base_io(struct dasd_ccw_req *);
 void dasd_alias_lcu_setup_complete(struct dasd_device *);
 void dasd_alias_wait_for_lcu_setup(struct dasd_device *);

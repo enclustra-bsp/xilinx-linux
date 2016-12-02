@@ -76,16 +76,18 @@ size_t iov_iter_copy_from_user_atomic(struct page *page,
 		struct iov_iter *i, unsigned long offset, size_t bytes);
 void iov_iter_advance(struct iov_iter *i, size_t bytes);
 int iov_iter_fault_in_readable(struct iov_iter *i, size_t bytes);
+int iov_iter_fault_in_multipages_readable(struct iov_iter *i, size_t bytes);
 size_t iov_iter_single_seg_count(const struct iov_iter *i);
 size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
 			 struct iov_iter *i);
 size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
 			 struct iov_iter *i);
-size_t copy_to_iter(void *addr, size_t bytes, struct iov_iter *i);
+size_t copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i);
 size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i);
 size_t copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i);
 size_t iov_iter_zero(size_t bytes, struct iov_iter *);
 unsigned long iov_iter_alignment(const struct iov_iter *i);
+unsigned long iov_iter_gap_alignment(const struct iov_iter *i);
 void iov_iter_init(struct iov_iter *i, int direction, const struct iovec *iov,
 			unsigned long nr_segs, size_t count);
 void iov_iter_kvec(struct iov_iter *i, int direction, const struct kvec *kvec,
@@ -109,6 +111,14 @@ static inline bool iter_is_iovec(struct iov_iter *i)
 {
 	return !(i->type & (ITER_BVEC | ITER_KVEC));
 }
+
+/*
+ * Get one of READ or WRITE out of iter->type without any other flags OR'd in
+ * with it.
+ *
+ * The ?: is just for type safety.
+ */
+#define iov_iter_rw(i) ((0 ? (struct iov_iter *)0 : (i))->type & RW_MASK)
 
 /*
  * Cap the iov_iter by given limit; note that the second argument is
@@ -136,7 +146,21 @@ static inline void iov_iter_reexpand(struct iov_iter *i, size_t count)
 {
 	i->count = count;
 }
-size_t csum_and_copy_to_iter(void *addr, size_t bytes, __wsum *csum, struct iov_iter *i);
+size_t csum_and_copy_to_iter(const void *addr, size_t bytes, __wsum *csum, struct iov_iter *i);
 size_t csum_and_copy_from_iter(void *addr, size_t bytes, __wsum *csum, struct iov_iter *i);
+
+int import_iovec(int type, const struct iovec __user * uvector,
+		 unsigned nr_segs, unsigned fast_segs,
+		 struct iovec **iov, struct iov_iter *i);
+
+#ifdef CONFIG_COMPAT
+struct compat_iovec;
+int compat_import_iovec(int type, const struct compat_iovec __user * uvector,
+		 unsigned nr_segs, unsigned fast_segs,
+		 struct iovec **iov, struct iov_iter *i);
+#endif
+
+int import_single_range(int type, void __user *buf, size_t len,
+		 struct iovec *iov, struct iov_iter *i);
 
 #endif

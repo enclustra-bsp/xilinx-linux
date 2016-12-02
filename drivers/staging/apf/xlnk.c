@@ -43,11 +43,15 @@
 #include <linux/pagemap.h>
 #include <linux/errno.h>	/* error codes */
 #include <linux/dma-mapping.h>  /* dma */
-#include <linux/clk.h>
 #include <linux/of.h>
 #include <linux/list.h>
+#include <linux/dma/xilinx_dma.h>
+#include <linux/uio_driver.h>
+#include <asm/cacheflush.h>
 
 #include "xlnk-ioctl.h"
+#include "xlnk-config.h"
+#include "xlnk-sysdef.h"
 #include "xlnk.h"
 
 #ifdef CONFIG_XILINX_DMA_APF
@@ -83,12 +87,18 @@ static ssize_t xlnk_dev_size;
 static int xlnk_dev_vmas;
 
 #define XLNK_BUF_POOL_SIZE	256
-static void **xlnk_bufpool;
 static unsigned int xlnk_bufpool_size = XLNK_BUF_POOL_SIZE;
+static void *xlnk_bufpool[XLNK_BUF_POOL_SIZE];
+static void *xlnk_bufpool_alloc_point[XLNK_BUF_POOL_SIZE];
+static xlnk_intptr_type xlnk_userbuf[XLNK_BUF_POOL_SIZE];
 static dma_addr_t xlnk_phyaddr[XLNK_BUF_POOL_SIZE];
 static size_t xlnk_buflen[XLNK_BUF_POOL_SIZE];
-static unsigned int  xlnk_bufcacheable[XLNK_BUF_POOL_SIZE];
+static unsigned int xlnk_bufcacheable[XLNK_BUF_POOL_SIZE];
+static spinlock_t xlnk_buf_lock;
 
+/* only used with standard DMA mode */
+static struct page **xlnk_page_store;
+static int xlnk_page_store_size;
 
 static int xlnk_open(struct inode *ip, struct file *filp);  /* Open */
 static int xlnk_release(struct inode *ip, struct file *filp);   /* Release */
@@ -124,10 +134,11 @@ struct xlnk_device_pack {
 	char name[64];
 	struct platform_device pdev;
 	struct resource res[8];
+	struct uio_info *io_ptr;
 
 #ifdef CONFIG_XILINX_DMA_APF
-	struct dma_channel_config dma_chan_cfg[4];  /* for xidane dma only */
-	struct dma_device_config dma_dev_cfg;	   /* for xidane dma only */
+	struct xdma_channel_config dma_chan_cfg[4];  /* for xidane dma only */
+	struct xdma_device_config dma_dev_cfg;	   /* for xidane dma only */
 #endif
 
 #ifdef CONFIG_XILINX_MCDMA
@@ -136,13 +147,15 @@ struct xlnk_device_pack {
 
 };
 
-static struct xlnk_device_pack *xlnk_devpacks[16];
+static spinlock_t xlnk_devpack_lock;
+static struct xlnk_device_pack *xlnk_devpacks[MAX_XLNK_DMAS];
 static void xlnk_devpacks_init(void)
 {
 	unsigned int i;
 
-	for (i = 0; i < 16; i++)
-		xlnk_devpacks[0] = NULL;
+	spin_lock_init(&xlnk_devpack_lock);
+	for (i = 0; i < MAX_XLNK_DMAS; i++)
+		xlnk_devpacks[i] = NULL;
 
 }
 
@@ -150,7 +163,7 @@ static void xlnk_devpacks_delete(struct xlnk_device_pack *devpack)
 {
 	unsigned int i;
 
-	for (i = 0; i < 16; i++) {
+	for (i = 0; i < MAX_XLNK_DMAS; i++) {
 		if (xlnk_devpacks[i] == devpack)
 			xlnk_devpacks[i] = NULL;
 	}
@@ -160,19 +173,21 @@ static void xlnk_devpacks_add(struct xlnk_device_pack *devpack)
 {
 	unsigned int i;
 
-	for (i = 0; i < 16; i++) {
+	spin_lock_irq(&xlnk_devpack_lock);
+	for (i = 0; i < MAX_XLNK_DMAS; i++) {
 		if (xlnk_devpacks[i] == NULL) {
 			xlnk_devpacks[i] = devpack;
 			break;
 		}
 	}
+	spin_unlock_irq(&xlnk_devpack_lock);
 }
 
-static struct xlnk_device_pack *xlnk_devpacks_find(unsigned long base)
+static struct xlnk_device_pack *xlnk_devpacks_find(xlnk_intptr_type base)
 {
 	unsigned int i;
 
-	for (i = 0; i < 16; i++) {
+	for (i = 0; i < MAX_XLNK_DMAS; i++) {
 		if (xlnk_devpacks[i]
 			&& xlnk_devpacks[i]->res[0].start == base)
 			return xlnk_devpacks[i];
@@ -180,13 +195,20 @@ static struct xlnk_device_pack *xlnk_devpacks_find(unsigned long base)
 	return NULL;
 }
 
-static void xlnk_devpacks_free(unsigned long base)
+static void xlnk_devpacks_free(xlnk_intptr_type base)
 {
 	struct xlnk_device_pack *devpack;
 
 	devpack = xlnk_devpacks_find(base);
 	if (devpack) {
-		platform_device_unregister(&devpack->pdev);
+		if (xlnk_config_dma_type(xlnk_config_dma_standard)) {
+			if (devpack->io_ptr)
+				uio_unregister_device(devpack->io_ptr);
+			if (strcmp(devpack->pdev.name, "xilinx-axidma") != 0)
+				platform_device_unregister(&devpack->pdev);
+		} else {
+			platform_device_unregister(&devpack->pdev);
+		}
 		xlnk_devpacks_delete(devpack);
 		kfree(devpack);
 	}
@@ -197,65 +219,62 @@ static void xlnk_devpacks_free_all(void)
 	struct xlnk_device_pack *devpack;
 	unsigned int i;
 
-	for (i = 0; i < 16; i++) {
+	for (i = 0; i < MAX_XLNK_DMAS; i++) {
 		devpack = xlnk_devpacks[i];
 		if (devpack) {
-			platform_device_unregister(&devpack->pdev);
+			if (devpack->io_ptr) {
+				uio_unregister_device(devpack->io_ptr);
+				kfree(devpack->io_ptr);
+			} else {
+				platform_device_unregister(&devpack->pdev);
+			}
 			xlnk_devpacks_delete(devpack);
 			kfree(devpack);
 		}
 	}
 }
 
-/**
- * struct xlnk_data - data specific to xlnk
- * @numxclks:	number of clocks available
- * @clks:	pointer to array of clocks
- *
- * This struct should contain all the data specific to xlnk
- */
-struct xlnk_data {
-	int numxclks;
-	struct clk **clks;
-};
-
-/**
- * xlnk_clk_control() - turn all xlnk clocks on or off
- * @turn_on:	false - turn off (disable), true - turn on (enable)
- *
- * This function obtains a list of available clocks from the driver data
- * and enables or disables all of them based on the value of turn_on
- */
-static void xlnk_clk_control(bool turn_on)
+static void xlnk_load_config_from_dt(struct platform_device *pdev)
 {
-	struct xlnk_data *xlnk_dat;
-	int i;
+	const char *dma_name = NULL;
+	struct xlnk_config_block block;
 
-	xlnk_dat = platform_get_drvdata(xlnk_pdev);
-	for (i = 0; i < xlnk_dat->numxclks; i++) {
-		if (IS_ERR(xlnk_dat->clks[i]))
-			continue;
-		if (turn_on)
-			clk_prepare_enable(xlnk_dat->clks[i]);
-		else
-			clk_disable_unprepare(xlnk_dat->clks[i]);
+	xlnk_init_config();
+	xlnk_get_config(&block);
+
+	if (of_property_read_string(xlnk_dev->of_node,
+				    "config-dma-type",
+				    &dma_name) == 0) {
+		if (strcmp(dma_name, "manual") == 0) {
+			block.valid_mask[xlnk_config_valid_dma_type] = 1;
+			block.dma_type = xlnk_config_dma_manual;
+		} else if (strcmp(dma_name, "standard") == 0) {
+			block.valid_mask[xlnk_config_valid_dma_type] = 1;
+			block.dma_type = xlnk_config_dma_standard;
+		} else
+			pr_err("%s: Unrecognized DMA type %s\n",
+			       __func__, dma_name);
 	}
+	xlnk_set_config(&block);
 }
 
 static int xlnk_probe(struct platform_device *pdev)
 {
 	int err, i;
-	const char *clkname;
-	struct clk **clks;
-	struct xlnk_data *xlnk_dat;
 	dev_t dev = 0;
 
 	xlnk_dev_buf = NULL;
 	xlnk_dev_size = 0;
 	xlnk_dev_vmas = 0;
-	xlnk_bufpool = NULL;
 
 	/* use 2.6 device model */
+	xlnk_page_store_size = 1024;
+	xlnk_page_store = vmalloc(sizeof(struct page *) * xlnk_page_store_size);
+	if (!xlnk_page_store) {
+		pr_err("failed to allocate memory for page store\n");
+		err = -ENOMEM;
+		goto err1;
+	}
 	err = alloc_chrdev_region(&dev, 0, 1, driver_name);
 	if (err) {
 		dev_err(&pdev->dev, "%s: Can't get major %d\n",
@@ -295,38 +314,9 @@ static int xlnk_probe(struct platform_device *pdev)
 
 	xlnk_pdev = pdev;
 	xlnk_dev = &pdev->dev;
-	xlnk_dat = devm_kzalloc(xlnk_dev,
-				sizeof(*xlnk_dat),
-				GFP_KERNEL);
-	if (!xlnk_dat)
-		return -ENOMEM;
 
-	xlnk_dat->numxclks = of_property_count_strings(xlnk_dev->of_node,
-							"clock-names");
-	if (xlnk_dat->numxclks > 0) {
-		clks = devm_kmalloc_array(xlnk_dev,
-					xlnk_dat->numxclks,
-					sizeof(struct clk *),
-					GFP_KERNEL);
-		if (!clks)
-			return -ENOMEM;
+	xlnk_load_config_from_dt(pdev);
 
-		xlnk_dat->clks = clks;
-		for (i = 0; i < xlnk_dat->numxclks; i++) {
-			of_property_read_string_index(xlnk_dev->of_node,
-						"clock-names",
-						i,
-						&clkname);
-			if (clkname) {
-				clks[i] = devm_clk_get(xlnk_dev, clkname);
-				if (IS_ERR(clks[i]))
-					dev_warn(xlnk_dev,
-						"Unable to get clk\n");
-			} else
-				dev_warn(xlnk_dev, "Unable to get clock\n");
-		}
-	}
-	platform_set_drvdata(xlnk_pdev, xlnk_dat);
 	if (xlnk_pdev)
 		dev_info(&pdev->dev, "xlnk_pdev is not null\n");
 	else
@@ -356,6 +346,20 @@ static int xlnk_buf_findnull(void)
 	return 0;
 }
 
+static int xlnk_buf_find_by_phys_addr(xlnk_intptr_type addr)
+{
+	int i;
+
+	for (i = 1; i < xlnk_bufpool_size; i++) {
+		if (xlnk_bufpool[i] &&
+		    xlnk_phyaddr[i] <= addr &&
+		    xlnk_phyaddr[i] + xlnk_buflen[i] > addr)
+			return i;
+	}
+
+	return 0;
+}
+
 /**
  * allocate and return an id
  * id must be a positve number
@@ -363,21 +367,40 @@ static int xlnk_buf_findnull(void)
 static int xlnk_allocbuf(unsigned int len, unsigned int cacheable)
 {
 	int id;
+	void *kaddr;
+	dma_addr_t phys_addr_anchor;
+	unsigned int page_dst;
 
-	id = xlnk_buf_findnull();
-
-	if (id <= 0)
+	if (cacheable)
+		kaddr = dma_alloc_noncoherent(xlnk_dev,
+					      len,
+					      &phys_addr_anchor,
+					      GFP_KERNEL |
+					      GFP_DMA |
+					      __GFP_REPEAT);
+	else
+		kaddr = dma_alloc_coherent(xlnk_dev,
+					   len,
+					   &phys_addr_anchor,
+					   GFP_KERNEL |
+					   GFP_DMA |
+					   __GFP_REPEAT);
+	if (!kaddr)
 		return -ENOMEM;
 
-	xlnk_bufpool[id] = dma_alloc_coherent(xlnk_dev, len,
-					      &xlnk_phyaddr[id],
-					      GFP_KERNEL | GFP_DMA);
-	xlnk_buflen[id] = len;
-	xlnk_bufcacheable[id] = cacheable;
+	spin_lock(&xlnk_buf_lock);
+	id = xlnk_buf_findnull();
+	if (id > 0 && id < XLNK_BUF_POOL_SIZE) {
+		xlnk_bufpool_alloc_point[id] = kaddr;
+		xlnk_bufpool[id] = kaddr;
+		xlnk_buflen[id] = len;
+		xlnk_bufcacheable[id] = cacheable;
+		xlnk_phyaddr[id] = phys_addr_anchor;
+	}
+	spin_unlock(&xlnk_buf_lock);
 
-	if (!xlnk_bufpool[id]) {
-		dev_err(xlnk_dev, "%s: dma_alloc_coherent of %d byte buffer failed\n",
-			 __func__, len);
+	if (id <= 0 || id >= XLNK_BUF_POOL_SIZE) {
+		pr_err("No id could be found in range\n");
 		return -ENOMEM;
 	}
 
@@ -388,16 +411,14 @@ static int xlnk_init_bufpool(void)
 {
 	unsigned int i;
 
-	xlnk_dev_buf = kmalloc(8192, GFP_KERNEL | __GFP_DMA);
+	spin_lock_init(&xlnk_buf_lock);
+	xlnk_dev_buf = kmalloc(8192, GFP_KERNEL | GFP_DMA);
 	*((char *)xlnk_dev_buf) = '\0';
 
 	if (!xlnk_dev_buf) {
 		dev_err(xlnk_dev, "%s: malloc failed\n", __func__);
 		return -ENOMEM;
 	}
-
-	xlnk_bufpool = kmalloc(sizeof(void *) * xlnk_bufpool_size,
-				   GFP_KERNEL);
 
 	xlnk_bufpool[0] = xlnk_dev_buf;
 	for (i = 1; i < xlnk_bufpool_size; i++)
@@ -415,9 +436,6 @@ static int xlnk_remove(struct platform_device *pdev)
 
 	kfree(xlnk_dev_buf);
 	xlnk_dev_buf = NULL;
-
-	kfree(xlnk_bufpool);
-	xlnk_bufpool = NULL;
 
 	devno = MKDEV(driver_major, 0);
 	cdev_del(&xlnk_cdev);
@@ -462,7 +480,6 @@ static int xlnk_open(struct inode *ip, struct file *filp)
 
 	if ((filp->f_flags & O_ACCMODE) == O_WRONLY)
 		xlnk_dev_size = 0;
-	xlnk_clk_control(true);
 
 	return status;
 }
@@ -518,15 +535,14 @@ static ssize_t xlnk_write(struct file *filp, const char __user *buf,
  */
 static int xlnk_release(struct inode *ip, struct file *filp)
 {
-	xlnk_clk_control(false);
 	return 0;
 }
 
 
 static int xlnk_devregister(char *name, unsigned int id,
-				unsigned long base, unsigned int size,
+				xlnk_intptr_type base, unsigned int size,
 				unsigned int *irqs,
-				u32 *handle)
+				xlnk_intptr_type *handle)
 {
 	unsigned int nres;
 	unsigned int nirq;
@@ -537,7 +553,7 @@ static int xlnk_devregister(char *name, unsigned int id,
 
 	devpack = xlnk_devpacks_find(base);
 	if (devpack) {
-		*handle = (u32)devpack;
+		*handle = (xlnk_intptr_type)devpack;
 		return 0;
 	}
 	nirq = 0;
@@ -555,13 +571,14 @@ static int xlnk_devregister(char *name, unsigned int id,
 
 	devpack = kzalloc(sizeof(struct xlnk_device_pack),
 			  GFP_KERNEL);
+	devpack->io_ptr = NULL;
 	strcpy(devpack->name, name);
 	devpack->pdev.name = devpack->name;
 
 	devpack->pdev.id = id;
 
 	devpack->pdev.dev.dma_mask = &dma_mask;
-	devpack->pdev.dev.coherent_dma_mask = 0xFFFFFFFF;
+	devpack->pdev.dev.coherent_dma_mask = dma_mask;
 
 	devpack->res[0].start = base;
 	devpack->res[0].end = base + size - 1;
@@ -582,13 +599,13 @@ static int xlnk_devregister(char *name, unsigned int id,
 		*handle = 0;
 	} else {
 		xlnk_devpacks_add(devpack);
-		*handle = (u32)devpack;
+		*handle = (xlnk_intptr_type)devpack;
 	}
 	return status;
 }
 
 static int xlnk_dmaregister(char *name, unsigned int id,
-				unsigned long base, unsigned int size,
+				xlnk_intptr_type base, unsigned int size,
 				unsigned int chan_num,
 				unsigned int chan0_dir,
 				unsigned int chan0_irq,
@@ -600,23 +617,23 @@ static int xlnk_dmaregister(char *name, unsigned int id,
 				unsigned int chan1_poll_mode,
 				unsigned int chan1_include_dre,
 				unsigned int chan1_data_width,
-				u32 *handle)
+				xlnk_intptr_type *handle)
 {
-	int status = -1;
+	int status = 0;
 
 #ifdef CONFIG_XILINX_DMA_APF
 
 	struct xlnk_device_pack *devpack;
 
-	if (strcmp(name, "xilinx-axidma"))
+	if (chan_num < 1 || chan_num > 2) {
+		pr_err("%s: Expected either 1 or 2 channels, got %d\n",
+		       __func__, chan_num);
 		return -EINVAL;
-
-	if (chan_num < 1 || chan_num > 2)
-		return -EINVAL;
+	}
 
 	devpack = xlnk_devpacks_find(base);
 	if (devpack) {
-		*handle = (u32)devpack;
+		*handle = (xlnk_intptr_type)devpack;
 		return 0;
 	}
 
@@ -624,9 +641,24 @@ static int xlnk_dmaregister(char *name, unsigned int id,
 			  GFP_KERNEL);
 	if (!devpack)
 		return -ENOMEM;
-
 	strcpy(devpack->name, name);
-	devpack->pdev.name = devpack->name;
+	devpack->pdev.name = "xilinx-axidma";
+	if (xlnk_config_dma_type(xlnk_config_dma_standard) &&
+	    chan0_data_width == 0 && chan1_data_width == 0) {
+		devpack->io_ptr = kzalloc(sizeof(*devpack->io_ptr),
+					  GFP_KERNEL);
+		if (!devpack->io_ptr)
+			return -EFAULT;
+		devpack->io_ptr->name = devpack->name;
+		devpack->io_ptr->version = "0.0.1";
+		devpack->io_ptr->irq = -1;
+		if (uio_register_device(xlnk_dev, devpack->io_ptr)) {
+			pr_err("UIO dummy failed to install\n");
+			return -EFAULT;
+		}
+	} else {
+		devpack->io_ptr = NULL;
+	}
 
 	devpack->pdev.id = id;
 
@@ -634,7 +666,8 @@ static int xlnk_dmaregister(char *name, unsigned int id,
 	devpack->dma_chan_cfg[0].datawidth   = chan0_data_width;
 	devpack->dma_chan_cfg[0].irq = chan0_irq;
 	devpack->dma_chan_cfg[0].poll_mode   = chan0_poll_mode;
-	devpack->dma_chan_cfg[0].type = chan0_dir ?
+	devpack->dma_chan_cfg[0].type =
+		(chan0_dir == XLNK_DMA_FROM_DEVICE) ?
 					"axi-dma-s2mm-channel" :
 					"axi-dma-mm2s-channel";
 
@@ -643,11 +676,13 @@ static int xlnk_dmaregister(char *name, unsigned int id,
 		devpack->dma_chan_cfg[1].datawidth   = chan1_data_width;
 		devpack->dma_chan_cfg[1].irq = chan1_irq;
 		devpack->dma_chan_cfg[1].poll_mode   = chan1_poll_mode;
-		devpack->dma_chan_cfg[1].type = chan1_dir ?
+		devpack->dma_chan_cfg[1].type =
+			(chan1_dir == XLNK_DMA_FROM_DEVICE) ?
 						"axi-dma-s2mm-channel" :
 						"axi-dma-mm2s-channel";
 	}
 
+	devpack->dma_dev_cfg.name = devpack->name;
 	devpack->dma_dev_cfg.type = "axi-dma";
 	devpack->dma_dev_cfg.include_sg = 1;
 	devpack->dma_dev_cfg.sg_include_stscntrl_strm = 1;
@@ -657,7 +692,7 @@ static int xlnk_dmaregister(char *name, unsigned int id,
 	devpack->pdev.dev.platform_data = &devpack->dma_dev_cfg;
 
 	devpack->pdev.dev.dma_mask = &dma_mask;
-	devpack->pdev.dev.coherent_dma_mask = 0xFFFFFFFF;
+	devpack->pdev.dev.coherent_dma_mask = dma_mask;
 
 	devpack->res[0].start = base;
 	devpack->res[0].end = base + size - 1;
@@ -665,14 +700,14 @@ static int xlnk_dmaregister(char *name, unsigned int id,
 
 	devpack->pdev.resource = devpack->res;
 	devpack->pdev.num_resources = 1;
-
-	status = platform_device_register(&devpack->pdev);
+	if (xlnk_config_dma_type(xlnk_config_dma_manual))
+		status = platform_device_register(&devpack->pdev);
 	if (status) {
 		kfree(devpack);
 		*handle = 0;
 	} else {
 		xlnk_devpacks_add(devpack);
-		*handle = (u32)devpack;
+		*handle = (xlnk_intptr_type)devpack;
 	}
 
 #endif
@@ -680,17 +715,21 @@ static int xlnk_dmaregister(char *name, unsigned int id,
 }
 
 static int xlnk_mcdmaregister(char *name, unsigned int id,
-			      unsigned long base, unsigned int size,
+			      xlnk_intptr_type base, unsigned int size,
 			      unsigned int mm2s_chan_num,
 			      unsigned int mm2s_chan_irq,
 			      unsigned int s2mm_chan_num,
 			      unsigned int s2mm_chan_irq,
-			      u32 *handle)
+			      xlnk_intptr_type *handle)
 {
 	int status = -1;
 
 #ifdef CONFIG_XILINX_MCDMA
 	struct xlnk_device_pack *devpack;
+	if (xlnk_config_dma_type(xlnk_config_dma_standard)) {
+		pr_err("Standard driver not yet supporting multichannel\n");
+		return -EFAULT;
+	}
 
 	if (strcmp(name, "xdma"))
 		return -EINVAL;
@@ -698,7 +737,7 @@ static int xlnk_mcdmaregister(char *name, unsigned int id,
 
 	devpack = xlnk_devpacks_find(base);
 	if (devpack) {
-		*handle = (u32)devpack;
+		*handle = (xlnk_intptr_type)devpack;
 		return 0;
 	}
 
@@ -718,7 +757,7 @@ static int xlnk_mcdmaregister(char *name, unsigned int id,
 
 	devpack->pdev.dev.platform_data	 = &devpack->mcdma_dev_cfg;
 	devpack->pdev.dev.dma_mask = &dma_mask;
-	devpack->pdev.dev.coherent_dma_mask = 0xFFFFFFFF;
+	devpack->pdev.dev.coherent_dma_mask = dma_mask;
 	devpack->pdev.dev.release = xdma_if_device_release,
 
 	devpack->res[0].start = base;
@@ -738,7 +777,7 @@ static int xlnk_mcdmaregister(char *name, unsigned int id,
 		*handle = 0;
 	} else {
 		xlnk_devpacks_add(devpack);
-		*handle = (u32)devpack;
+		*handle = (xlnk_intptr_type)devpack;
 	}
 
 #endif
@@ -752,7 +791,7 @@ static int xlnk_allocbuf_ioctl(struct file *filp, unsigned int code,
 
 	union xlnk_args temp_args;
 	int status;
-	int id;
+	xlnk_int_type id;
 
 	status = copy_from_user(&temp_args, (void __user *)args,
 				sizeof(union xlnk_args));
@@ -766,27 +805,46 @@ static int xlnk_allocbuf_ioctl(struct file *filp, unsigned int code,
 	if (id <= 0)
 		return -ENOMEM;
 
-	put_user(id, temp_args.allocbuf.idptr);
-	put_user((u32)(xlnk_phyaddr[id]), temp_args.allocbuf.phyaddrptr);
+	temp_args.allocbuf.id = id;
+	temp_args.allocbuf.phyaddr = (xlnk_intptr_type)(xlnk_phyaddr[id]);
+	status = copy_to_user(args, &temp_args, sizeof(union xlnk_args));
 
-	return 0;
+	return status;
 }
 
 static int xlnk_freebuf(int id)
 {
-
+	void *alloc_point;
+	dma_addr_t p_addr;
+	size_t buf_len;
+	int cacheable;
 	if (id <= 0 || id >= xlnk_bufpool_size)
 		return -ENOMEM;
 
 	if (!xlnk_bufpool[id])
 		return -ENOMEM;
 
-	dma_free_coherent(xlnk_dev, xlnk_buflen[id], xlnk_bufpool[id],
-			  xlnk_phyaddr[id]);
-
+	spin_lock(&xlnk_buf_lock);
+	alloc_point = xlnk_bufpool_alloc_point[id];
+	p_addr = xlnk_phyaddr[id];
+	buf_len = xlnk_buflen[id];
 	xlnk_bufpool[id] = NULL;
 	xlnk_phyaddr[id] = (dma_addr_t)NULL;
 	xlnk_buflen[id] = 0;
+	cacheable = xlnk_bufcacheable[id];
+	xlnk_bufcacheable[id] = 0;
+	spin_unlock(&xlnk_buf_lock);
+
+	if (cacheable)
+		dma_free_noncoherent(xlnk_dev,
+				     buf_len,
+				     alloc_point,
+				     p_addr);
+	else
+		dma_free_coherent(xlnk_dev,
+				  buf_len,
+				  alloc_point,
+				  p_addr);
 
 	return 0;
 }
@@ -820,25 +878,25 @@ static int xlnk_freebuf_ioctl(struct file *filp, unsigned int code,
 static int xlnk_adddmabuf_ioctl(struct file *filp, unsigned int code,
 			unsigned long args)
 {
-	struct dmabuf_args db_args;
+	union xlnk_args temp_args;
 	struct xlnk_dmabuf_reg *db;
 	int status;
 
-	status = copy_from_user(&db_args, (void __user *)args,
-			sizeof(struct dmabuf_args));
+	status = copy_from_user(&temp_args, (void __user *)args,
+				sizeof(union xlnk_args));
 
 	if (status)
 		return -ENOMEM;
 
 	dev_dbg(xlnk_dev, "Registering dmabuf fd %d for virtual address %p\n",
-		db_args.dmabuf_fd, db_args.user_vaddr);
+		temp_args.dmabuf.dmabuf_fd, temp_args.dmabuf.user_addr);
 
 	db = kzalloc(sizeof(struct xlnk_dmabuf_reg), GFP_KERNEL);
 	if (!db)
 		return -ENOMEM;
 
-	db->dmabuf_fd = db_args.dmabuf_fd;
-	db->user_vaddr = db_args.user_vaddr;
+	db->dmabuf_fd = temp_args.dmabuf.dmabuf_fd;
+	db->user_vaddr = temp_args.dmabuf.user_addr;
 
 	db->dbuf = dma_buf_get(db->dmabuf_fd);
 	if (IS_ERR_OR_NULL(db->dbuf)) {
@@ -857,22 +915,23 @@ static int xlnk_adddmabuf_ioctl(struct file *filp, unsigned int code,
 static int xlnk_cleardmabuf_ioctl(struct file *filp, unsigned int code,
 				unsigned long args)
 {
-	struct dmabuf_args db_args;
+	union xlnk_args temp_args;
 	struct xlnk_dmabuf_reg *dp, *dp_temp;
 	int status;
 
-	status = copy_from_user(&db_args, (void __user *)args,
-			sizeof(struct dmabuf_args));
+	status = copy_from_user(&temp_args, (void __user *)args,
+				sizeof(union xlnk_args));
 
 	if (status)
 		return -ENOMEM;
 
 	list_for_each_entry_safe(dp, dp_temp, &xlnk_dmabuf_list, list) {
-		if (dp->user_vaddr == db_args.user_vaddr) {
+		if (dp->user_vaddr == temp_args.dmabuf.user_addr) {
 			if (dp->is_mapped) {
 				dma_buf_unmap_attachment(dp->dbuf_attach,
 					dp->dbuf_sg_table, dp->dma_direction);
 				dma_buf_detach(dp->dbuf, dp->dbuf_attach);
+				kfree(dp->sg_list);
 			}
 			dma_buf_put(dp->dbuf);
 			list_del(&dp->list);
@@ -891,7 +950,6 @@ static int xlnk_dmarequest_ioctl(struct file *filp, unsigned int code,
 
 	union xlnk_args temp_args;
 	int status;
-	struct xdma_chan *chan;
 
 	status = copy_from_user(&temp_args, (void __user *)args,
 				sizeof(union xlnk_args));
@@ -902,15 +960,31 @@ static int xlnk_dmarequest_ioctl(struct file *filp, unsigned int code,
 	if (!temp_args.dmarequest.name[0])
 		return 0;
 
-	chan = xdma_request_channel(temp_args.dmarequest.name);
+	if (xlnk_config_dma_type(xlnk_config_dma_standard)) {
+		struct dma_chan *chan;
 
-	if (!chan) {
-		return -ENOMEM;
+		if (!xlnk_dev->of_node) {
+			pr_err("xlnk %s: No device tree info.", __func__);
+			return -EFAULT;
+		}
+		chan = dma_request_slave_channel(xlnk_dev,
+						 temp_args.dmarequest.name);
+		if (!chan) {
+			pr_err("Unable to get channel named %s\n",
+			       temp_args.dmarequest.name);
+			return -EFAULT;
+		}
+		temp_args.dmarequest.dmachan = (xlnk_intptr_type)chan;
+	} else {
+		struct xdma_chan *chan =
+			xdma_request_channel(temp_args.dmarequest.name);
+
+		if (!chan)
+			return -ENOMEM;
+		temp_args.dmarequest.dmachan = (xlnk_intptr_type)chan;
+		temp_args.dmarequest.bd_space_phys_addr = chan->bd_phys_addr;
+		temp_args.dmarequest.bd_space_size = chan->bd_chain_size;
 	}
-
-	temp_args.dmarequest.dmachan = (u32)chan;
-	temp_args.dmarequest.bd_space_phys_addr = chan->bd_phys_addr;
-	temp_args.dmarequest.bd_space_size = chan->bd_chain_size;
 
 	if (copy_to_user((void __user *)args, &temp_args,
 			sizeof(union xlnk_args)))
@@ -926,10 +1000,14 @@ static int xlnk_dmarequest_ioctl(struct file *filp, unsigned int code,
 
 }
 
+static void xlnk_complete_dma_callback(void *args)
+{
+	complete(args);
+}
+
 static int xlnk_dmasubmit_ioctl(struct file *filp, unsigned int code,
 				unsigned long args)
 {
-
 #ifdef CONFIG_XILINX_DMA_APF
 	union xlnk_args temp_args;
 	struct xdma_head *dmahead;
@@ -954,25 +1032,190 @@ static int xlnk_dmasubmit_ioctl(struct file *filp, unsigned int code,
 		}
 	}
 
-	status = xdma_submit((struct xdma_chan *)temp_args.dmasubmit.dmachan,
-						temp_args.dmasubmit.buf,
-						temp_args.dmasubmit.len,
-						temp_args.dmasubmit.nappwords_i,
-						temp_args.dmasubmit.appwords_i,
-						temp_args.dmasubmit.nappwords_o,
-						temp_args.dmasubmit.flag,
-						&dmahead,
-						cp);
+	if (xlnk_config_dma_type(xlnk_config_dma_standard)) {
+		struct xlnk_dma_transfer_handle *t =
+			vmalloc(sizeof(struct xlnk_dma_transfer_handle));
 
-	if (!status) {
-		temp_args.dmasubmit.dmahandle = (u32)dmahead;
+		if (!t) {
+			pr_err("Could not allocate dma transfer handle\n");
+			return -ENOMEM;
+		}
+		t->transfer_direction = temp_args.dmasubmit.dmadir;
+		t->user_addr = (xlnk_intptr_type)temp_args.dmasubmit.buf;
+		t->transfer_length = temp_args.dmasubmit.len;
+		t->flags = temp_args.dmasubmit.flag;
+		t->channel = (struct dma_chan *)(temp_args.dmasubmit.dmachan);
+		if (t->flags & CF_FLAG_PHYSICALLY_CONTIGUOUS) {
+			int id = xlnk_buf_find_by_phys_addr(t->user_addr);
+
+			if (id <= 0) {
+				pr_err("invalid ID, failing\n");
+				return -EFAULT;
+			}
+			t->kern_addr = xlnk_bufpool[id];
+			t->sg_effective_length = 1;
+			t->sg_list_size = 1;
+			t->sg_list = kmalloc(sizeof(*t->sg_list)
+					     * (t->sg_list_size),
+					     GFP_KERNEL | GFP_DMA);
+			sg_init_table(t->sg_list, t->sg_list_size);
+			t->dma_addr = dma_map_single(t->channel->device->dev,
+						     t->kern_addr,
+						     t->transfer_length,
+						     t->transfer_direction);
+			if (dma_mapping_error(t->channel->device->dev,
+					      t->dma_addr)) {
+				pr_err("DMA mapping error\n");
+				vfree(t);
+				return -EFAULT;
+			}
+			sg_dma_address(t->sg_list) = t->dma_addr;
+			sg_dma_len(t->sg_list) = t->transfer_length;
+		} else {
+			unsigned long it;
+			int locked_page_count;
+			int p_it;
+			unsigned long first_page = t->user_addr / PAGE_SIZE;
+			unsigned long last_page =
+				(t->user_addr + (t->transfer_length - 1))
+				/ PAGE_SIZE;
+
+			t->kern_addr = NULL;
+			t->dma_addr = 0;
+			t->sg_list_size = last_page - first_page;
+			t->sg_list = kmalloc(sizeof(*t->sg_list)
+					     * (t->sg_list_size),
+					     GFP_KERNEL | GFP_DMA);
+			if (!t->sg_list) {
+				vfree(t);
+				return -ENOMEM;
+			}
+			if (xlnk_page_store_size <= t->sg_list_size) {
+				struct page **tmp =
+					vmalloc(sizeof(struct page *)
+						* 2 * t->sg_list_size);
+
+				if (!tmp) {
+					kfree(t->sg_list);
+					vfree(t);
+					return -ENOMEM;
+				}
+				xlnk_page_store = tmp;
+				xlnk_page_store_size = 2 * t->sg_list_size;
+			}
+			down_read(&current->mm->mmap_sem);
+			locked_page_count =
+				get_user_pages(first_page * PAGE_SIZE,
+					       t->sg_list_size, 1, 1,
+					       xlnk_page_store, NULL);
+			up_read(&current->mm->mmap_sem);
+			if (locked_page_count != t->sg_list_size) {
+				int i;
+
+				pr_err("could not get user pages");
+				for (i = 0; i < locked_page_count; i++)
+					put_page(xlnk_page_store[i]);
+				kfree(t->sg_list);
+				vfree(t);
+				return -EFAULT;
+			}
+			it = t->user_addr;
+			p_it = 0;
+			sg_init_table(t->sg_list, t->sg_list_size);
+			while (it < t->user_addr + t->transfer_length) {
+				unsigned long page_addr =
+					(it / PAGE_SIZE) * PAGE_SIZE;
+				unsigned long offset = it - page_addr;
+				unsigned long page_barrier =
+					page_addr + PAGE_SIZE;
+				unsigned long segment_end =
+					(page_barrier < t->user_addr +
+					t->transfer_length) ?
+					page_barrier :
+					(t->user_addr + t->transfer_length);
+				unsigned long segment_size = segment_end - it;
+
+				it = segment_end;
+				sg_set_page(t->sg_list + p_it,
+					    xlnk_page_store[p_it],
+					    (unsigned int)segment_size,
+					    (unsigned int)offset);
+				p_it++;
+			}
+			t->sg_effective_length =
+				dma_map_sg(t->channel->device->dev,
+					   t->sg_list,
+					   t->sg_list_size,
+					   t->transfer_direction);
+			if (t->sg_effective_length == 0) {
+				int i;
+
+				pr_err("could not map user pages");
+				for (i = 0; i < locked_page_count; i++)
+					put_page(xlnk_page_store[i]);
+				kfree(t->sg_list);
+				vfree(t);
+				return -EFAULT;
+			}
+		}
+		t->async_desc =
+			t->channel->device->device_prep_slave_sg(
+				t->channel, t->sg_list,
+				t->sg_effective_length,
+				t->transfer_direction,
+				DMA_CTRL_ACK | DMA_PREP_INTERRUPT,
+				temp_args.dmasubmit.appwords_i);
+		if (!t->async_desc) {
+			pr_err("Async desc is null, aborting\n");
+			return -EFAULT;
+		}
+		init_completion(&t->completion_handle);
+		t->async_desc->callback = &xlnk_complete_dma_callback;
+		t->async_desc->callback_param = &t->completion_handle;
+		t->dma_cookie = t->async_desc->tx_submit(t->async_desc);
+		dma_async_issue_pending(t->channel);
+		if (dma_submit_error(t->dma_cookie)) {
+			pr_err("Huge problem submitting DMA action\n");
+			return -EFAULT;
+		}
+		temp_args.dmasubmit.dmahandle = (xlnk_intptr_type)t;
+	} else {
+		int buf_id;
+		void *kaddr = NULL;
+
+		spin_lock(&xlnk_buf_lock);
+		buf_id =
+			xlnk_buf_find_by_phys_addr(temp_args.dmasubmit.buf);
+		if (buf_id) {
+			xlnk_intptr_type addr_delta =
+				temp_args.dmasubmit.buf -
+				xlnk_phyaddr[buf_id];
+			kaddr = (u8 *)(xlnk_bufpool[buf_id]) + addr_delta;
+		}
+		spin_unlock(&xlnk_buf_lock);
+
+		status = xdma_submit((struct xdma_chan *)
+				     (temp_args.dmasubmit.dmachan),
+				     temp_args.dmasubmit.buf,
+						 kaddr,
+				     temp_args.dmasubmit.len,
+				     temp_args.dmasubmit.nappwords_i,
+				     temp_args.dmasubmit.appwords_i,
+				     temp_args.dmasubmit.nappwords_o,
+				     temp_args.dmasubmit.flag,
+				     &dmahead,
+				     cp);
+
+		temp_args.dmasubmit.dmahandle = (xlnk_intptr_type)dmahead;
 		temp_args.dmasubmit.last_bd_index =
-					(u32)dmahead->last_bd_index;
+			(xlnk_intptr_type)dmahead->last_bd_index;
+	}
+	if (!status) {
 		if (copy_to_user((void __user *)args, &temp_args,
 				sizeof(union xlnk_args)))
 			return -EFAULT;
-		return 0;
 	}
+	return status;
 #endif
 	return -ENOMEM;
 }
@@ -992,20 +1235,57 @@ static int xlnk_dmawait_ioctl(struct file *filp, unsigned int code,
 
 	if (status)
 		return -ENOMEM;
+	if (xlnk_config_dma_type(xlnk_config_dma_standard)) {
+		int dma_result;
+		struct xlnk_dma_transfer_handle *t =
+			(struct xlnk_dma_transfer_handle *)
+			temp_args.dmawait.dmahandle;
 
-	dmahead = (struct xdma_head *)temp_args.dmawait.dmahandle;
-	status = xdma_wait(dmahead, dmahead->userflag);
+		wait_for_completion(&t->completion_handle);
+		dma_result = dma_async_is_tx_complete(t->channel,
+						      t->dma_cookie,
+						      NULL, NULL);
+		if (dma_result != DMA_COMPLETE) {
+			pr_err("Dma transfer failed for unknown reason\n");
+			return -1;
+		}
+		if (t->dma_addr) {
+			dma_unmap_single(t->channel->device->dev,
+					 t->dma_addr,
+					 t->transfer_length,
+					 t->transfer_direction);
+		} else {
+			int i;
 
-	if (temp_args.dmawait.nappwords) {
-		memcpy(temp_args.dmawait.appwords, dmahead->appwords_o,
-			   dmahead->nappwords_o * sizeof(u32));
+			dma_unmap_sg(t->channel->device->dev,
+				     t->sg_list,
+				     t->sg_list_size,
+				     t->transfer_direction);
+			for (i = 0; i < t->sg_list_size; i++)
+				put_page(sg_page(t->sg_list + i));
+		}
+		kfree(t->sg_list);
+		vfree(t);
+	} else {
+		struct xdma_head *dmahead =
+			(struct xdma_head *)temp_args.dmawait.dmahandle;
 
-		if (copy_to_user((void __user *)args, &temp_args,
-				sizeof(union xlnk_args)))
+		status = xdma_wait(dmahead,
+				   dmahead->userflag,
+				   &temp_args.dmawait.flags);
+		if (temp_args.dmawait.flags & XDMA_FLAGS_WAIT_COMPLETE) {
+			if (temp_args.dmawait.nappwords) {
+				memcpy(temp_args.dmawait.appwords,
+				       dmahead->appwords_o,
+				       dmahead->nappwords_o * sizeof(u32));
+			}
+			kfree(dmahead);
+		}
+		if (copy_to_user((void __user *)args,
+				 &temp_args,
+				 sizeof(union xlnk_args)))
 			return -EFAULT;
 	}
-	kfree(dmahead);
-
 #endif
 
 	return status;
@@ -1025,7 +1305,12 @@ static int xlnk_dmarelease_ioctl(struct file *filp, unsigned int code,
 	if (status)
 		return -ENOMEM;
 
-	xdma_release_channel((struct xdma_chan *)temp_args.dmarelease.dmachan);
+	if (xlnk_config_dma_type(xlnk_config_dma_standard))
+		dma_release_channel((struct dma_chan *)
+				   (temp_args.dmarelease.dmachan));
+	else
+		xdma_release_channel((struct xdma_chan *)
+				    (temp_args.dmarelease.dmachan));
 #endif
 
 	return status;
@@ -1037,7 +1322,7 @@ static int xlnk_devregister_ioctl(struct file *filp, unsigned int code,
 {
 	union xlnk_args temp_args;
 	int status;
-	u32 handle;
+	xlnk_intptr_type handle;
 
 	status = copy_from_user(&temp_args, (void __user *)args,
 				sizeof(union xlnk_args));
@@ -1060,7 +1345,7 @@ static int xlnk_dmaregister_ioctl(struct file *filp, unsigned int code,
 {
 	union xlnk_args temp_args;
 	int status;
-	u32 handle;
+	xlnk_intptr_type handle;
 
 	status = copy_from_user(&temp_args, (void __user *)args,
 				sizeof(union xlnk_args));
@@ -1093,7 +1378,7 @@ static int xlnk_mcdmaregister_ioctl(struct file *filp, unsigned int code,
 {
 	union xlnk_args temp_args;
 	int status;
-	u32 handle;
+	xlnk_intptr_type handle;
 
 	status = copy_from_user(&temp_args, (void __user *)args,
 				sizeof(union xlnk_args));
@@ -1137,6 +1422,12 @@ static int xlnk_cachecontrol_ioctl(struct file *filp, unsigned int code,
 	union xlnk_args temp_args;
 	int status, size;
 	void *paddr, *kaddr;
+	int buf_id;
+
+	if (xlnk_config_dma_type(xlnk_config_dma_standard)) {
+		pr_err("Manual cache management is forbidden in standard dma types");
+		return -1;
+	}
 
 	status = copy_from_user(&temp_args, (void __user *)args,
 						sizeof(union xlnk_args));
@@ -1156,21 +1447,54 @@ static int xlnk_cachecontrol_ioctl(struct file *filp, unsigned int code,
 
 	size = temp_args.cachecontrol.size;
 	paddr = temp_args.cachecontrol.phys_addr;
-	kaddr = phys_to_virt((unsigned int)paddr);
 
-	if (temp_args.cachecontrol.action == 0) {
-		/* flush cache */
-		dmac_map_area(kaddr, size, DMA_TO_DEVICE);
-		outer_clean_range((unsigned int)paddr,
-				  (unsigned int)(paddr + size));
-	} else {
-		/* invalidate cache */
-		outer_inv_range((unsigned int)paddr,
-				(unsigned int)(paddr + size));
-		dmac_unmap_area(kaddr, size, DMA_FROM_DEVICE);
+	spin_lock(&xlnk_buf_lock);
+	buf_id = xlnk_buf_find_by_phys_addr(paddr);
+	kaddr = xlnk_bufpool[buf_id];
+	spin_unlock(&xlnk_buf_lock);
+
+	if (buf_id == 0) {
+		pr_err("Illegal cachecontrol on non-sds_alloc memory");
+		return -EINVAL;
 	}
 
+#if XLNK_SYS_BIT_WIDTH == 32
+	__cpuc_flush_dcache_area(kaddr, size);
+	outer_flush_range(paddr, paddr + size);
+	if (temp_args.cachecontrol.action == 1)
+		outer_inv_range(paddr, paddr + size);
+#else
+	if (temp_args.cachecontrol.action == 1)
+		__dma_map_area(kaddr, size, DMA_FROM_DEVICE);
+	else
+		__dma_map_area(kaddr, size, DMA_TO_DEVICE);
+#endif
 	return 0;
+}
+
+static int xlnk_config_ioctl(struct file *filp, unsigned long args)
+{
+	struct xlnk_config_block block;
+	int status, setting = 0, i;
+
+	xlnk_config_clear_block(&block);
+	status = copy_from_user(&block, (void __user *)args,
+				sizeof(struct xlnk_config_block));
+	if (status) {
+		pr_err("Error in copy_from_user. status= %d\n", status);
+		return -ENOMEM;
+	}
+	for (i = 0; i < xlnk_config_valid_size; i++)
+		if (block.valid_mask[i])
+			setting = 1;
+	if (setting) {
+		status = xlnk_set_config(&block);
+	} else {
+		xlnk_get_config(&block);
+		status = copy_to_user(args, &block,
+				      sizeof(struct xlnk_config_block));
+	}
+	return status;
 }
 
 /* This function provides IO interface to the bridge driver. */
@@ -1232,6 +1556,11 @@ static long xlnk_ioctl(struct file *filp, unsigned int code,
 	case XLNK_IOCRECRES: /* recover resource */
 		status = xlnk_recover_resource(args);
 		break;
+	case XLNK_IOCCONFIG:
+		status = xlnk_config_ioctl(filp, args);
+		break;
+	default:
+		status = -EINVAL;
 	}
 
 	return status;
@@ -1245,7 +1574,6 @@ static struct vm_operations_struct xlnk_vm_ops = {
 /* This function maps kernel space memory to user space memory. */
 static int xlnk_mmap(struct file *filp, struct vm_area_struct *vma)
 {
-
 	int bufid;
 	int status;
 
@@ -1257,16 +1585,39 @@ static int xlnk_mmap(struct file *filp, struct vm_area_struct *vma)
 				vma->vm_end - vma->vm_start,
 				vma->vm_page_prot);
 	else {
-		if (xlnk_bufcacheable[bufid] == 0)
-			vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+		if (xlnk_config_dma_type(xlnk_config_dma_standard)) {
+			unsigned long pfn;
 
-		status = remap_pfn_range(vma, vma->vm_start,
-					 xlnk_phyaddr[bufid] >> PAGE_SHIFT,
-					 vma->vm_end - vma->vm_start,
-					 vma->vm_page_prot);
+			if (vma->vm_start != PAGE_ALIGN(vma->vm_start)) {
+				pr_err("Cannot map on non-aligned addresses\n");
+				return -1;
+			}
+			if (xlnk_bufcacheable[bufid] == 0)
+				vma->vm_page_prot =
+				pgprot_noncached(vma->vm_page_prot);
+			pfn = virt_to_pfn(xlnk_bufpool[bufid]);
+			status = remap_pfn_range(vma,
+						 vma->vm_start,
+						 pfn,
+						 vma->vm_end - vma->vm_start,
+						 vma->vm_page_prot);
+			xlnk_userbuf[bufid] = vma->vm_start;
+		} else {
+			if (xlnk_bufcacheable[bufid] == 0)
+				vma->vm_page_prot =
+					pgprot_noncached(vma->vm_page_prot);
+			status = remap_pfn_range(vma, vma->vm_start,
+						 xlnk_phyaddr[bufid]
+						 >> PAGE_SHIFT,
+						 vma->vm_end - vma->vm_start,
+						 vma->vm_page_prot);
+		}
+
 	}
-	if (status)
+	if (status) {
+		pr_err("xlnk_mmap failed with code %d\n", EAGAIN);
 		return -EAGAIN;
+	}
 
 	xlnk_vma_open(vma);
 	vma->vm_ops = &xlnk_vm_ops;

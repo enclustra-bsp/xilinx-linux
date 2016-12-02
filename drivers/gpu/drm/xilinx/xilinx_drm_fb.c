@@ -38,6 +38,8 @@ struct xilinx_drm_fbdev {
 	struct xilinx_drm_fb	*fb;
 	unsigned int align;
 	unsigned int vres_mult;
+	struct drm_display_mode old_mode;
+	bool mode_backup;
 };
 
 static inline struct xilinx_drm_fbdev *to_fbdev(struct drm_fb_helper *fb_helper)
@@ -89,7 +91,8 @@ static struct drm_framebuffer_funcs xilinx_drm_fb_funcs = {
  * Return: a xilinx_drm_fb object, or ERR_PTR.
  */
 static struct xilinx_drm_fb *
-xilinx_drm_fb_alloc(struct drm_device *drm, struct drm_mode_fb_cmd2 *mode_cmd,
+xilinx_drm_fb_alloc(struct drm_device *drm,
+		    const struct drm_mode_fb_cmd2 *mode_cmd,
 		    struct drm_gem_cma_object **obj, unsigned int num_planes)
 {
 	struct xilinx_drm_fb *fb;
@@ -144,9 +147,10 @@ int xilinx_drm_fb_helper_pan_display(struct fb_var_screeninfo *var,
 	int ret = 0;
 	int i;
 
-	if (__drm_modeset_lock_all(dev, !!oops_in_progress))
+	if (oops_in_progress)
 		return -EBUSY;
 
+	drm_modeset_lock_all(dev);
 	for (i = 0; i < fb_helper->crtc_count; i++) {
 		modeset = &fb_helper->crtc_info[i].mode_set;
 
@@ -156,7 +160,6 @@ int xilinx_drm_fb_helper_pan_display(struct fb_var_screeninfo *var,
 		if (modeset->num_connectors) {
 			ret = drm_mode_set_config_internal(modeset);
 			if (!ret) {
-				drm_wait_one_vblank(dev, i);
 				info->var.xoffset = var->xoffset;
 				info->var.yoffset = var->yoffset;
 			}
@@ -164,6 +167,59 @@ int xilinx_drm_fb_helper_pan_display(struct fb_var_screeninfo *var,
 	}
 	drm_modeset_unlock_all(dev);
 	return ret;
+}
+
+/**
+ * xilinx_drm_fb_set_config - synchronize resolution changes with fbdev
+ * @fb_helper: fb helper structure
+ * @set: mode set configuration
+ */
+void xilinx_drm_fb_set_config(struct drm_fb_helper *fb_helper,
+				struct drm_mode_set *set)
+{
+	if (fb_helper && set) {
+		struct xilinx_drm_fbdev *fbdev = to_fbdev(fb_helper);
+
+		if (fbdev && fb_helper->crtc_info &&
+		    fb_helper->crtc_info[0].mode_set.mode && set->mode) {
+			if (!fbdev->mode_backup) {
+				fbdev->old_mode =
+					*fb_helper->crtc_info[0].mode_set.mode;
+				fbdev->mode_backup = true;
+			}
+			drm_mode_copy(fb_helper->crtc_info[0].mode_set.mode,
+					set->mode);
+	       }
+	}
+}
+
+int
+xilinx_drm_fb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
+{
+	struct drm_fb_helper *fb_helper = info->par;
+	unsigned int i;
+	int ret = 0;
+
+	switch (cmd) {
+	case FBIO_WAITFORVSYNC:
+		for (i = 0; i < fb_helper->crtc_count; i++) {
+			struct drm_mode_set *mode_set;
+			struct drm_crtc *crtc;
+
+			mode_set = &fb_helper->crtc_info[i].mode_set;
+			crtc = mode_set->crtc;
+			ret = drm_crtc_vblank_get(crtc);
+			if (!ret) {
+				drm_crtc_wait_one_vblank(crtc);
+				drm_crtc_vblank_put(crtc);
+			}
+		}
+		return ret;
+	default:
+		return -ENOTTY;
+	}
+
+	return 0;
 }
 
 static struct fb_ops xilinx_drm_fbdev_ops = {
@@ -176,6 +232,7 @@ static struct fb_ops xilinx_drm_fbdev_ops = {
 	.fb_blank	= drm_fb_helper_blank,
 	.fb_pan_display	= xilinx_drm_fb_helper_pan_display,
 	.fb_setcmap	= drm_fb_helper_setcmap,
+	.fb_ioctl	= xilinx_drm_fb_ioctl,
 };
 
 /**
@@ -384,6 +441,17 @@ void xilinx_drm_fb_fini(struct drm_fb_helper *fb_helper)
  */
 void xilinx_drm_fb_restore_mode(struct drm_fb_helper *fb_helper)
 {
+	struct xilinx_drm_fbdev *fbdev = to_fbdev(fb_helper);
+
+	/* restore old display mode */
+	if (fb_helper && fbdev && fbdev->mode_backup &&
+	    fb_helper->crtc_info &&
+	    fb_helper->crtc_info[0].mode_set.mode) {
+		drm_mode_copy(fb_helper->crtc_info[0].mode_set.mode,
+				&(fbdev->old_mode));
+		fbdev->mode_backup = false;
+	}
+
 	if (fb_helper)
 		drm_fb_helper_restore_fbdev_mode_unlocked(fb_helper);
 }
@@ -400,9 +468,9 @@ void xilinx_drm_fb_restore_mode(struct drm_fb_helper *fb_helper)
  *
  * Return: a drm_framebuffer object if successful, or ERR_PTR.
  */
-struct drm_framebuffer *xilinx_drm_fb_create(struct drm_device *drm,
-					     struct drm_file *file_priv,
-					     struct drm_mode_fb_cmd2 *mode_cmd)
+struct drm_framebuffer *
+xilinx_drm_fb_create(struct drm_device *drm, struct drm_file *file_priv,
+		     const struct drm_mode_fb_cmd2 *mode_cmd)
 {
 	struct xilinx_drm_fb *fb;
 	struct drm_gem_cma_object *objs[4];
@@ -411,12 +479,6 @@ struct drm_framebuffer *xilinx_drm_fb_create(struct drm_device *drm,
 	unsigned int vsub;
 	int ret;
 	int i;
-
-	if (!xilinx_drm_check_format(drm, mode_cmd->pixel_format)) {
-		DRM_ERROR("unsupported pixel format %08x\n",
-			  mode_cmd->pixel_format);
-		return ERR_PTR(-EINVAL);
-	}
 
 	hsub = drm_format_horz_chroma_subsampling(mode_cmd->pixel_format);
 	vsub = drm_format_vert_chroma_subsampling(mode_cmd->pixel_format);
@@ -476,6 +538,13 @@ err_gem_object_unreference:
  */
 void xilinx_drm_fb_hotplug_event(struct drm_fb_helper *fb_helper)
 {
+	if (fb_helper) {
+		struct xilinx_drm_fbdev *fbdev = to_fbdev(fb_helper);
+
+		if (fbdev)
+			fbdev->mode_backup = false;
+	}
+
 	if (fb_helper)
 		drm_fb_helper_hotplug_event(fb_helper);
 }

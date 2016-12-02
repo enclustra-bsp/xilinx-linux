@@ -109,7 +109,7 @@ static int ion_handle_test_kernel(struct dma_buf *dma_buf, void __user *ptr,
 	if (offset > dma_buf->size || size > dma_buf->size - offset)
 		return -EINVAL;
 
-	ret = dma_buf_begin_cpu_access(dma_buf, offset, size, dir);
+	ret = dma_buf_begin_cpu_access(dma_buf, dir);
 	if (ret)
 		return ret;
 
@@ -139,7 +139,7 @@ static int ion_handle_test_kernel(struct dma_buf *dma_buf, void __user *ptr,
 		copy_offset = 0;
 	}
 err:
-	dma_buf_end_cpu_access(dma_buf, offset, size, dir);
+	dma_buf_end_cpu_access(dma_buf, dir);
 	return ret;
 }
 
@@ -261,7 +261,21 @@ static int __init ion_test_probe(struct platform_device *pdev)
 	return 0;
 }
 
+static int ion_test_remove(struct platform_device *pdev)
+{
+	struct ion_test_device *testdev;
+
+	testdev = platform_get_drvdata(pdev);
+	if (!testdev)
+		return -ENODATA;
+
+	misc_deregister(&testdev->misc);
+	return 0;
+}
+
+static struct platform_device *ion_test_pdev;
 static struct platform_driver ion_test_platform_driver = {
+	.remove = ion_test_remove,
 	.driver = {
 		.name = "ion-test",
 	},
@@ -269,14 +283,20 @@ static struct platform_driver ion_test_platform_driver = {
 
 static int __init ion_test_init(void)
 {
-	platform_device_register_simple("ion-test", -1, NULL, 0);
+	ion_test_pdev = platform_device_register_simple("ion-test",
+							-1, NULL, 0);
+	if (IS_ERR(ion_test_pdev))
+		return PTR_ERR(ion_test_pdev);
+
 	return platform_driver_probe(&ion_test_platform_driver, ion_test_probe);
 }
 
 static void __exit ion_test_exit(void)
 {
 	platform_driver_unregister(&ion_test_platform_driver);
+	platform_device_unregister(ion_test_pdev);
 }
 
 module_init(ion_test_init);
 module_exit(ion_test_exit);
+MODULE_LICENSE("GPL v2");

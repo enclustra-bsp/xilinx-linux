@@ -169,7 +169,7 @@ static void check_hung_uninterruptible_tasks(unsigned long timeout)
 		return;
 
 	rcu_read_lock();
-	do_each_thread(g, t) {
+	for_each_process_thread(g, t) {
 		if (!max_count--)
 			goto unlock;
 		if (!--batch_count) {
@@ -180,15 +180,17 @@ static void check_hung_uninterruptible_tasks(unsigned long timeout)
 		/* use "==" to skip the TASK_KILLABLE tasks waiting on NFS */
 		if (t->state == TASK_UNINTERRUPTIBLE)
 			check_hung_task(t, timeout);
-	} while_each_thread(g, t);
+	}
  unlock:
 	rcu_read_unlock();
 }
 
-static unsigned long timeout_jiffies(unsigned long timeout)
+static long hung_timeout_jiffies(unsigned long last_checked,
+				 unsigned long timeout)
 {
 	/* timeout of 0 will disable the watchdog */
-	return timeout ? timeout * HZ : MAX_SCHEDULE_TIMEOUT;
+	return timeout ? last_checked - jiffies + timeout * HZ :
+		MAX_SCHEDULE_TIMEOUT;
 }
 
 /*
@@ -224,18 +226,21 @@ EXPORT_SYMBOL_GPL(reset_hung_task_detector);
  */
 static int watchdog(void *dummy)
 {
+	unsigned long hung_last_checked = jiffies;
+
 	set_user_nice(current, 0);
 
 	for ( ; ; ) {
 		unsigned long timeout = sysctl_hung_task_timeout_secs;
+		long t = hung_timeout_jiffies(hung_last_checked, timeout);
 
-		while (schedule_timeout_interruptible(timeout_jiffies(timeout)))
-			timeout = sysctl_hung_task_timeout_secs;
-
-		if (atomic_xchg(&reset_hung_task, 0))
+		if (t <= 0) {
+			if (!atomic_xchg(&reset_hung_task, 0))
+				check_hung_uninterruptible_tasks(timeout);
+			hung_last_checked = jiffies;
 			continue;
-
-		check_hung_uninterruptible_tasks(timeout);
+		}
+		schedule_timeout_interruptible(t);
 	}
 
 	return 0;

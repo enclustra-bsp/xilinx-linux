@@ -641,6 +641,22 @@ xfs_dir2_block_leaf_p(struct xfs_dir2_block_tail *btp)
  */
 #define XFS_ATTR_LEAF_MAPSIZE	3	/* how many freespace slots */
 
+/*
+ * Entries are packed toward the top as tight as possible.
+ */
+typedef struct xfs_attr_shortform {
+	struct xfs_attr_sf_hdr {	/* constant-structure header block */
+		__be16	totsize;	/* total bytes in shortform list */
+		__u8	count;	/* count of active entries */
+	} hdr;
+	struct xfs_attr_sf_entry {
+		__uint8_t namelen;	/* actual length of name (no NULL) */
+		__uint8_t valuelen;	/* actual length of value (no NULL) */
+		__uint8_t flags;	/* flags bits (see xfs_attr_leaf.h) */
+		__uint8_t nameval[1];	/* name & value bytes concatenated */
+	} list[1];			/* variable sized array */
+} xfs_attr_shortform_t;
+
 typedef struct xfs_attr_leaf_map {	/* RLE map of free bytes */
 	__be16	base;			  /* base of free region */
 	__be16	size;			  /* length of free region */
@@ -680,8 +696,15 @@ typedef struct xfs_attr_leaf_name_remote {
 typedef struct xfs_attr_leafblock {
 	xfs_attr_leaf_hdr_t	hdr;	/* constant-structure header block */
 	xfs_attr_leaf_entry_t	entries[1];	/* sorted on key, not name */
-	xfs_attr_leaf_name_local_t namelist;	/* grows from bottom of buf */
-	xfs_attr_leaf_name_remote_t valuelist;	/* grows from bottom of buf */
+	/*
+	 * The rest of the block contains the following structures after the
+	 * leaf entries, growing from the bottom up. The variables are never
+	 * referenced and definining them can actually make gcc optimize away
+	 * accesses to the 'entries' array above index 0 so don't do that.
+	 *
+	 * xfs_attr_leaf_name_local_t namelist;
+	 * xfs_attr_leaf_name_remote_t valuelist;
+	 */
 } xfs_attr_leafblock_t;
 
 /*
@@ -725,13 +748,25 @@ struct xfs_attr3_icleaf_hdr {
 	__uint16_t	magic;
 	__uint16_t	count;
 	__uint16_t	usedbytes;
-	__uint16_t	firstused;
+	/*
+	 * firstused is 32-bit here instead of 16-bit like the on-disk variant
+	 * to support maximum fsb size of 64k without overflow issues throughout
+	 * the attr code. Instead, the overflow condition is handled on
+	 * conversion to/from disk.
+	 */
+	__uint32_t	firstused;
 	__u8		holes;
 	struct {
 		__uint16_t	base;
 		__uint16_t	size;
 	} freemap[XFS_ATTR_LEAF_MAPSIZE];
 };
+
+/*
+ * Special value to represent fs block size in the leaf header firstused field.
+ * Only used when block size overflows the 2-bytes available on disk.
+ */
+#define XFS_ATTR3_LEAF_NULLOFF	0
 
 /*
  * Flags used in the leaf_entry[i].flags field.

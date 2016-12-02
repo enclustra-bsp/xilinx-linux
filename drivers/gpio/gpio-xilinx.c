@@ -40,7 +40,7 @@
 #define XGPIO_CHANNEL_OFFSET	0x8
 
 /* Read/Write access to the GPIO registers */
-#ifdef CONFIG_ARCH_ZYNQ
+#if defined(CONFIG_ARCH_ZYNQ) || defined(CONFIG_ARM64)
 # define xgpio_readreg(offset)		readl(offset)
 # define xgpio_writereg(offset, val)	writel(val, offset)
 #else
@@ -119,6 +119,45 @@ static void xgpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
 
 	xgpio_writereg(regs + chip->offset + XGPIO_DATA_OFFSET,
 							 chip->gpio_state);
+
+	spin_unlock_irqrestore(&chip->gpio_lock, flags);
+}
+
+/**
+ * xgpio_set_multiple - Write the specified signals of the GPIO device.
+ * @gc:     Pointer to gpio_chip device structure.
+ * @mask:   Mask of the GPIOS to modify.
+ * @bits:   Value to be wrote on each GPIO
+ *
+ * This function writes the specified values in to the specified signals of the
+ * GPIO devices.
+ */
+static void xgpio_set_multiple(struct gpio_chip *gc, unsigned long *mask,
+			       unsigned long *bits)
+{
+	unsigned long flags;
+	struct of_mm_gpio_chip *mm_gc = to_of_mm_gpio_chip(gc);
+	struct xgpio_instance *chip =
+	    container_of(mm_gc, struct xgpio_instance, mmchip);
+	void __iomem *regs = mm_gc->regs;
+	int i;
+
+	spin_lock_irqsave(&chip->gpio_lock, flags);
+
+	/* Write to GPIO signals */
+	for (i = 0; i < gc->ngpio; i++) {
+		if (*mask == 0)
+			break;
+		if (__test_and_clear_bit(i, mask)) {
+			if (test_bit(i, bits))
+				chip->gpio_state |= BIT(i);
+			else
+				chip->gpio_state &= ~BIT(i);
+		}
+	}
+
+	xgpio_writereg(regs + chip->offset + XGPIO_DATA_OFFSET,
+		       chip->gpio_state);
 
 	spin_unlock_irqrestore(&chip->gpio_lock, flags);
 }
@@ -208,7 +247,7 @@ static void xgpio_save_regs(struct of_mm_gpio_chip *mm_gc)
 }
 
 /**
- * xgpio_xlate - Set initial values of GPIO pins
+ * xgpio_xlate - Translate gpio_spec to the GPIO number and flags
  * @gc: Pointer to gpio_chip device structure.
  * @gpiospec:  gpio specifier as found in the device tree
  * @flags: A flags pointer based on binding
@@ -347,8 +386,10 @@ static int xgpio_to_irq(struct gpio_chip *gc, unsigned offset)
  * @irq: gpio irq number
  * @desc: Pointer to interrupt description
  */
-static void xgpio_irqhandler(unsigned int irq, struct irq_desc *desc)
+static void xgpio_irqhandler(struct irq_desc *desc)
 {
+	unsigned int irq = irq_desc_get_irq(desc);
+
 	struct xgpio_instance *chip = (struct xgpio_instance *)
 						irq_get_handler_data(irq);
 	struct of_mm_gpio_chip *mm_gc = &chip->mmchip;
@@ -393,8 +434,6 @@ static int xgpio_irq_setup(struct device_node *np, struct xgpio_instance *chip)
 		return 0;
 	}
 
-	chip->mmchip.gc.of_xlate = xgpio_xlate;
-	chip->mmchip.gc.of_gpio_n_cells = 2;
 	chip->mmchip.gc.to_irq = xgpio_to_irq;
 
 	chip->irq_base = irq_alloc_descs(-1, 0, chip->mmchip.gc.ngpio, 0);
@@ -418,9 +457,6 @@ static int xgpio_irq_setup(struct device_node *np, struct xgpio_instance *chip)
 		irq_set_chip_and_handler(gpio_irq, &xgpio_irqchip,
 					 handle_simple_irq);
 		irq_set_chip_data(gpio_irq, (void *)chip);
-#ifdef CONFIG_ARCH_ZYNQ
-		set_irq_flags(gpio_irq, IRQF_VALID);
-#endif
 	}
 	irq_set_handler_data(res.start, (void *)chip);
 	irq_set_chained_handler(res.start, xgpio_irqhandler);
@@ -470,10 +506,13 @@ static int xgpio_of_probe(struct platform_device *pdev)
 
 	spin_lock_init(&chip->gpio_lock);
 
+	chip->mmchip.gc.of_xlate = xgpio_xlate;
+	chip->mmchip.gc.of_gpio_n_cells = 2;
 	chip->mmchip.gc.direction_input = xgpio_dir_in;
 	chip->mmchip.gc.direction_output = xgpio_dir_out;
 	chip->mmchip.gc.get = xgpio_get;
 	chip->mmchip.gc.set = xgpio_set;
+	chip->mmchip.gc.set_multiple = xgpio_set_multiple;
 
 	chip->mmchip.save_regs = xgpio_save_regs;
 
@@ -524,10 +563,13 @@ static int xgpio_of_probe(struct platform_device *pdev)
 
 		spin_lock_init(&chip->gpio_lock);
 
+		chip->mmchip.gc.of_xlate = xgpio_xlate;
+		chip->mmchip.gc.of_gpio_n_cells = 2;
 		chip->mmchip.gc.direction_input = xgpio_dir_in;
 		chip->mmchip.gc.direction_output = xgpio_dir_out;
 		chip->mmchip.gc.get = xgpio_get;
 		chip->mmchip.gc.set = xgpio_set;
+		chip->mmchip.gc.set_multiple = xgpio_set_multiple;
 
 		chip->mmchip.save_regs = xgpio_save_regs;
 

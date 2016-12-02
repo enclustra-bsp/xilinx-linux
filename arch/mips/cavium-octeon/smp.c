@@ -42,7 +42,7 @@ static irqreturn_t mailbox_interrupt(int irq, void *dev_id)
 	cvmx_write_csr(CVMX_CIU_MBOX_CLRX(coreid), action);
 
 	if (action & SMP_CALL_FUNCTION)
-		smp_call_function_interrupt();
+		generic_smp_call_function_interrupt();
 	if (action & SMP_RESCHEDULE_YOURSELF)
 		scheduler_ipi();
 
@@ -72,7 +72,7 @@ static inline void octeon_send_ipi_mask(const struct cpumask *mask,
 {
 	unsigned int i;
 
-	for_each_cpu_mask(i, *mask)
+	for_each_cpu(i, mask)
 		octeon_send_ipi_single(i, action);
 }
 
@@ -239,7 +239,7 @@ static int octeon_cpu_disable(void)
 		return -ENOTSUPP;
 
 	set_cpu_online(cpu, false);
-	cpu_clear(cpu, cpu_callin_map);
+	cpumask_clear_cpu(cpu, &cpu_callin_map);
 	octeon_fixup_irqs();
 
 	flush_cache_all();
@@ -331,7 +331,7 @@ static int octeon_update_boot_vector(unsigned int cpu)
 	}
 
 	if (!(avail_coremask & (1 << coreid))) {
-		/* core not available, assume, that catched by simple-executive */
+		/* core not available, assume, that caught by simple-executive */
 		cvmx_write_csr(CVMX_CIU_PP_RST, 1 << coreid);
 		cvmx_write_csr(CVMX_CIU_PP_RST, 0);
 	}

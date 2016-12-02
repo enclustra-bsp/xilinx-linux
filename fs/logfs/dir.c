@@ -183,7 +183,7 @@ static struct page *logfs_get_dd_page(struct inode *dir, struct dentry *dentry)
 		if (name->len != be16_to_cpu(dd->namelen) ||
 				memcmp(name->name, dd->name, name->len)) {
 			kunmap_atomic(dd);
-			page_cache_release(page);
+			put_page(page);
 			continue;
 		}
 
@@ -213,7 +213,7 @@ static void abort_transaction(struct inode *inode, struct logfs_transaction *ta)
 static int logfs_unlink(struct inode *dir, struct dentry *dentry)
 {
 	struct logfs_super *super = logfs_super(dir->i_sb);
-	struct inode *inode = dentry->d_inode;
+	struct inode *inode = d_inode(dentry);
 	struct logfs_transaction *ta;
 	struct page *page;
 	pgoff_t index;
@@ -238,7 +238,7 @@ static int logfs_unlink(struct inode *dir, struct dentry *dentry)
 		return PTR_ERR(page);
 	}
 	index = page->index;
-	page_cache_release(page);
+	put_page(page);
 
 	mutex_lock(&super->s_dirop_mutex);
 	logfs_add_transaction(dir, ta);
@@ -271,7 +271,7 @@ static inline int logfs_empty_dir(struct inode *dir)
 
 static int logfs_rmdir(struct inode *dir, struct dentry *dentry)
 {
-	struct inode *inode = dentry->d_inode;
+	struct inode *inode = d_inode(dentry);
 
 	if (!logfs_empty_dir(inode))
 		return -ENOTEMPTY;
@@ -316,7 +316,7 @@ static int logfs_readdir(struct file *file, struct dir_context *ctx)
 				be16_to_cpu(dd->namelen),
 				be64_to_cpu(dd->ino), dd->type);
 		kunmap(page);
-		page_cache_release(page);
+		put_page(page);
 		if (full)
 			break;
 	}
@@ -349,7 +349,7 @@ static struct dentry *logfs_lookup(struct inode *dir, struct dentry *dentry,
 	dd = kmap_atomic(page);
 	ino = be64_to_cpu(dd->ino);
 	kunmap_atomic(dd);
-	page_cache_release(page);
+	put_page(page);
 
 	inode = logfs_iget(dir->i_sb, ino);
 	if (IS_ERR(inode))
@@ -392,7 +392,7 @@ static int logfs_write_dir(struct inode *dir, struct dentry *dentry,
 
 		err = logfs_write_buf(dir, page, WF_LOCK);
 		unlock_page(page);
-		page_cache_release(page);
+		put_page(page);
 		if (!err)
 			grow_dir(dir, index);
 		return err;
@@ -528,7 +528,8 @@ static int logfs_symlink(struct inode *dir, struct dentry *dentry,
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
 
-	inode->i_op = &logfs_symlink_iops;
+	inode->i_op = &page_symlink_inode_operations;
+	inode_nohighmem(inode);
 	inode->i_mapping->a_ops = &logfs_reg_aops;
 
 	return __logfs_create(dir, dentry, inode, target, destlen);
@@ -537,7 +538,7 @@ static int logfs_symlink(struct inode *dir, struct dentry *dentry,
 static int logfs_link(struct dentry *old_dentry, struct inode *dir,
 		struct dentry *dentry)
 {
-	struct inode *inode = old_dentry->d_inode;
+	struct inode *inode = d_inode(old_dentry);
 
 	inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	ihold(inode);
@@ -560,7 +561,7 @@ static int logfs_get_dd(struct inode *dir, struct dentry *dentry,
 	map = kmap_atomic(page);
 	memcpy(dd, map, sizeof(*dd));
 	kunmap_atomic(map);
-	page_cache_release(page);
+	put_page(page);
 	return 0;
 }
 
@@ -607,7 +608,7 @@ static int logfs_rename_cross(struct inode *old_dir, struct dentry *old_dentry,
 	/* 2. write target dd */
 	mutex_lock(&super->s_dirop_mutex);
 	logfs_add_transaction(new_dir, ta);
-	err = logfs_write_dir(new_dir, new_dentry, old_dentry->d_inode);
+	err = logfs_write_dir(new_dir, new_dentry, d_inode(old_dentry));
 	if (!err)
 		err = write_inode(new_dir);
 
@@ -658,8 +659,8 @@ static int logfs_rename_target(struct inode *old_dir, struct dentry *old_dentry,
 			       struct inode *new_dir, struct dentry *new_dentry)
 {
 	struct logfs_super *super = logfs_super(old_dir->i_sb);
-	struct inode *old_inode = old_dentry->d_inode;
-	struct inode *new_inode = new_dentry->d_inode;
+	struct inode *old_inode = d_inode(old_dentry);
+	struct inode *new_inode = d_inode(new_dentry);
 	int isdir = S_ISDIR(old_inode->i_mode);
 	struct logfs_disk_dentry dd;
 	struct logfs_transaction *ta;
@@ -719,7 +720,7 @@ out:
 static int logfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 			struct inode *new_dir, struct dentry *new_dentry)
 {
-	if (new_dentry->d_inode)
+	if (d_really_is_positive(new_dentry))
 		return logfs_rename_target(old_dir, old_dentry,
 					   new_dir, new_dentry);
 	return logfs_rename_cross(old_dir, old_dentry, new_dir, new_dentry);
@@ -775,11 +776,6 @@ fail:
 	LOGFS_BUG(sb);
 	return -EIO;
 }
-
-const struct inode_operations logfs_symlink_iops = {
-	.readlink	= generic_readlink,
-	.follow_link	= page_follow_link_light,
-};
 
 const struct inode_operations logfs_dir_iops = {
 	.create		= logfs_create,

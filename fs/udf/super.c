@@ -48,7 +48,6 @@
 #include <linux/stat.h>
 #include <linux/cdrom.h>
 #include <linux/nls.h>
-#include <linux/buffer_head.h>
 #include <linux/vfs.h>
 #include <linux/vmalloc.h>
 #include <linux/errno.h>
@@ -180,7 +179,8 @@ static int __init init_inodecache(void)
 	udf_inode_cachep = kmem_cache_create("udf_inode_cache",
 					     sizeof(struct udf_inode_info),
 					     0, (SLAB_RECLAIM_ACCOUNT |
-						 SLAB_MEM_SPREAD),
+						 SLAB_MEM_SPREAD |
+						 SLAB_ACCOUNT),
 					     init_once);
 	if (!udf_inode_cachep)
 		return -ENOMEM;
@@ -279,17 +279,12 @@ static void udf_sb_free_bitmap(struct udf_bitmap *bitmap)
 {
 	int i;
 	int nr_groups = bitmap->s_nr_groups;
-	int size = sizeof(struct udf_bitmap) + (sizeof(struct buffer_head *) *
-						nr_groups);
 
 	for (i = 0; i < nr_groups; i++)
 		if (bitmap->s_block_bitmap[i])
 			brelse(bitmap->s_block_bitmap[i]);
 
-	if (size <= PAGE_SIZE)
-		kfree(bitmap);
-	else
-		vfree(bitmap);
+	kvfree(bitmap);
 }
 
 static void udf_free_partition(struct udf_part_map *map)
@@ -892,18 +887,14 @@ static int udf_find_fileset(struct super_block *sb,
 static int udf_load_pvoldesc(struct super_block *sb, sector_t block)
 {
 	struct primaryVolDesc *pvoldesc;
-	struct ustr *instr, *outstr;
+	uint8_t *outstr;
 	struct buffer_head *bh;
 	uint16_t ident;
 	int ret = -ENOMEM;
 
-	instr = kmalloc(sizeof(struct ustr), GFP_NOFS);
-	if (!instr)
-		return -ENOMEM;
-
-	outstr = kmalloc(sizeof(struct ustr), GFP_NOFS);
+	outstr = kmalloc(128, GFP_NOFS);
 	if (!outstr)
-		goto out1;
+		return -ENOMEM;
 
 	bh = udf_read_tagged(sb, block, block, &ident);
 	if (!bh) {
@@ -928,25 +919,25 @@ static int udf_load_pvoldesc(struct super_block *sb, sector_t block)
 #endif
 	}
 
-	if (!udf_build_ustr(instr, pvoldesc->volIdent, 32))
-		if (udf_CS0toUTF8(outstr, instr)) {
-			strncpy(UDF_SB(sb)->s_volume_ident, outstr->u_name,
-				outstr->u_len > 31 ? 31 : outstr->u_len);
-			udf_debug("volIdent[] = '%s'\n",
-				  UDF_SB(sb)->s_volume_ident);
-		}
+	ret = udf_dstrCS0toUTF8(outstr, 31, pvoldesc->volIdent, 32);
+	if (ret < 0)
+		goto out_bh;
 
-	if (!udf_build_ustr(instr, pvoldesc->volSetIdent, 128))
-		if (udf_CS0toUTF8(outstr, instr))
-			udf_debug("volSetIdent[] = '%s'\n", outstr->u_name);
+	strncpy(UDF_SB(sb)->s_volume_ident, outstr, ret);
+	udf_debug("volIdent[] = '%s'\n", UDF_SB(sb)->s_volume_ident);
+
+	ret = udf_dstrCS0toUTF8(outstr, 127, pvoldesc->volSetIdent, 128);
+	if (ret < 0)
+		goto out_bh;
+
+	outstr[ret] = 0;
+	udf_debug("volSetIdent[] = '%s'\n", outstr);
 
 	ret = 0;
 out_bh:
 	brelse(bh);
 out2:
 	kfree(outstr);
-out1:
-	kfree(instr);
 	return ret;
 }
 
@@ -1581,6 +1572,13 @@ static void udf_load_logicalvolint(struct super_block *sb, struct kernel_extent_
 }
 
 /*
+ * Maximum number of Terminating Descriptor redirections. The chosen number is
+ * arbitrary - just that we hopefully don't limit any real use of rewritten
+ * inode on write-once media but avoid looping for too long on corrupted media.
+ */
+#define UDF_MAX_TD_NESTING 64
+
+/*
  * Process a main/reserve volume descriptor sequence.
  *   @block		First block of first extent of the sequence.
  *   @lastblock		Lastblock of first extent of the sequence.
@@ -1604,6 +1602,7 @@ static noinline int udf_process_sequence(
 	uint16_t ident;
 	long next_s = 0, next_e = 0;
 	int ret;
+	unsigned int indirections = 0;
 
 	memset(vds, 0, sizeof(struct udf_vds_record) * VDS_POS_LENGTH);
 
@@ -1674,6 +1673,12 @@ static noinline int udf_process_sequence(
 			}
 			break;
 		case TAG_IDENT_TD: /* ISO 13346 3/10.9 */
+			if (++indirections > UDF_MAX_TD_NESTING) {
+				udf_err(sb, "too many TDs (max %u supported)\n", UDF_MAX_TD_NESTING);
+				brelse(bh);
+				return -EIO;
+			}
+
 			vds[VDS_POS_TERMINATING_DESC].block = block;
 			if (next_e) {
 				block = next_s;
@@ -2065,6 +2070,7 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 	struct udf_options uopt;
 	struct kernel_lb_addr rootdir, fileset;
 	struct udf_sb_info *sbi;
+	bool lvid_open = false;
 
 	uopt.flags = (1 << UDF_FLAG_USE_AD_IN_ICB) | (1 << UDF_FLAG_STRICT);
 	uopt.uid = INVALID_UID;
@@ -2211,8 +2217,10 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 			 le16_to_cpu(ts.year), ts.month, ts.day,
 			 ts.hour, ts.minute, le16_to_cpu(ts.typeAndTimezone));
 	}
-	if (!(sb->s_flags & MS_RDONLY))
+	if (!(sb->s_flags & MS_RDONLY)) {
 		udf_open_lvid(sb);
+		lvid_open = true;
+	}
 
 	/* Assign the root inode */
 	/* assign inodes by physical block number */
@@ -2243,7 +2251,7 @@ parse_options_failure:
 	if (UDF_QUERY_FLAG(sb, UDF_FLAG_NLS_MAP))
 		unload_nls(sbi->s_nls_map);
 #endif
-	if (!(sb->s_flags & MS_RDONLY))
+	if (lvid_open)
 		udf_close_lvid(sb);
 	brelse(sbi->s_lvid_bh);
 	udf_sb_free_partitions(sb);
@@ -2340,7 +2348,7 @@ static int udf_statfs(struct dentry *dentry, struct kstatfs *buf)
 					  le32_to_cpu(lvidiu->numDirs)) : 0)
 			+ buf->f_bfree;
 	buf->f_ffree = buf->f_bfree;
-	buf->f_namelen = UDF_NAME_LEN - 2;
+	buf->f_namelen = UDF_NAME_LEN;
 	buf->f_fsid.val[0] = (u32)id;
 	buf->f_fsid.val[1] = (u32)(id >> 32);
 

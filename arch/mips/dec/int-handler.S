@@ -5,7 +5,7 @@
  * Written by Ralf Baechle and Andreas Busse, modified for DECstation
  * support by Paul Antoine and Harald Koerfgen.
  *
- * completly rewritten:
+ * completely rewritten:
  * Copyright (C) 1998 Harald Koerfgen
  *
  * Rewritten extensively for controller-driven IRQ support
@@ -267,8 +267,13 @@ handle_it:
 
 #ifdef CONFIG_32BIT
 fpu:
+		lw	t0,fpu_kstat_irq
+		nop
+		lw	t1,(t0)
+		nop
+		addu	t1,1
 		j	handle_fpe_int
-		 nop
+		 sw	t1,(t0)
 #endif
 
 spurious:

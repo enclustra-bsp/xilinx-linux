@@ -69,6 +69,9 @@
 #define V4L2_CID_XILINX_TPG_STUCK_PIXEL_THRESH	(V4L2_CID_XILINX_TPG + 16)
 /* Noise level */
 #define V4L2_CID_XILINX_TPG_NOISE_GAIN		(V4L2_CID_XILINX_TPG + 17)
+/* Foreground pattern (HLS)*/
+#define V4L2_CID_XILINX_TPG_HLS_FG_PATTERN     (V4L2_CID_XILINX_TPG + 18)
+
 
 /*
  * Xilinx CRESAMPLE Video IP
@@ -125,5 +128,19 @@
 
 /* The IP model */
 #define V4L2_CID_XILINX_HLS_MODEL		(V4L2_CID_XILINX_HLS + 1)
+
+/*
+ * Xilinx MIPI CSI2 Rx Subsystem
+ */
+
+/* Base ID */
+#define V4L2_CID_XILINX_MIPICSISS		(V4L2_CID_USER_BASE + 0xc080)
+
+/* Active Lanes */
+#define V4L2_CID_XILINX_MIPICSISS_ACT_LANES	(V4L2_CID_XILINX_MIPICSISS + 1)
+/* Frames received since streaming is set */
+#define V4L2_CID_XILINX_MIPICSISS_FRAME_COUNTER	(V4L2_CID_XILINX_MIPICSISS + 2)
+/* Reset all event counters */
+#define V4L2_CID_XILINX_MIPICSISS_RESET_COUNTERS (V4L2_CID_XILINX_MIPICSISS + 3)
 
 #endif /* __UAPI_XILINX_V4L2_CONTROLS_H__ */

@@ -72,6 +72,7 @@
 #if defined(CONFIG_LEDS_CLASS) || defined(CONFIG_LEDS_CLASS_MODULE)
 #include <linux/leds.h>
 #endif
+#include <acpi/video.h>
 
 #define FUJITSU_DRIVER_VERSION "0.6.0"
 
@@ -113,6 +114,7 @@
 #define KEY2_CODE	0x411
 #define KEY3_CODE	0x412
 #define KEY4_CODE	0x413
+#define KEY5_CODE	0x420
 
 #define MAX_HOTKEY_RINGBUFFER_SIZE 100
 #define RINGBUFFERSIZE 40
@@ -148,7 +150,7 @@ struct fujitsu_t {
 	char phys[32];
 	struct backlight_device *bl_device;
 	struct platform_device *pf_device;
-	int keycode1, keycode2, keycode3, keycode4;
+	int keycode1, keycode2, keycode3, keycode4, keycode5;
 
 	unsigned int max_brightness;
 	unsigned int brightness_changed;
@@ -822,6 +824,7 @@ static int acpi_fujitsu_hotkey_add(struct acpi_device *device)
 	set_bit(fujitsu->keycode2, input->keybit);
 	set_bit(fujitsu->keycode3, input->keybit);
 	set_bit(fujitsu->keycode4, input->keybit);
+	set_bit(fujitsu->keycode5, input->keybit);
 	set_bit(KEY_UNKNOWN, input->keybit);
 
 	error = input_register_device(input);
@@ -961,6 +964,9 @@ static void acpi_fujitsu_hotkey_notify(struct acpi_device *device, u32 event)
 			case KEY4_CODE:
 				keycode = fujitsu->keycode4;
 				break;
+			case KEY5_CODE:
+				keycode = fujitsu->keycode5;
+				break;
 			case 0:
 				keycode = 0;
 				break;
@@ -1071,6 +1077,7 @@ static int __init fujitsu_init(void)
 	fujitsu->keycode2 = KEY_PROG2;
 	fujitsu->keycode3 = KEY_PROG3;
 	fujitsu->keycode4 = KEY_PROG4;
+	fujitsu->keycode5 = KEY_RFKILL;
 	dmi_check_system(fujitsu_dmi_table);
 
 	result = acpi_bus_register_driver(&acpi_fujitsu_driver);
@@ -1099,7 +1106,7 @@ static int __init fujitsu_init(void)
 
 	/* Register backlight stuff */
 
-	if (!acpi_video_backlight_support()) {
+	if (acpi_video_get_backlight_type() == acpi_backlight_vendor) {
 		struct backlight_properties props;
 
 		memset(&props, 0, sizeof(struct backlight_properties));
@@ -1137,8 +1144,7 @@ static int __init fujitsu_init(void)
 	}
 
 	/* Sync backlight power status (needs FUJ02E3 device, hence deferred) */
-
-	if (!acpi_video_backlight_support()) {
+	if (acpi_video_get_backlight_type() == acpi_backlight_vendor) {
 		if (call_fext_func(FUNC_BACKLIGHT, 0x2, 0x4, 0x0) == 3)
 			fujitsu->bl_device->props.power = FB_BLANK_POWERDOWN;
 		else

@@ -22,6 +22,7 @@
  *      .../monmap      - current monmap
  *      .../osdc        - active osd requests
  *      .../monc        - mon client state
+ *      .../client_options - libceph-only (i.e. not rbd or cephfs) options
  *      .../dentry_lru  - dump contents of dentry lru
  *      .../caps        - expose cap (reservation) stats
  *      .../bdi         - symlink to ../../bdi/something
@@ -111,15 +112,20 @@ static int monc_show(struct seq_file *s, void *p)
 	struct ceph_mon_generic_request *req;
 	struct ceph_mon_client *monc = &client->monc;
 	struct rb_node *rp;
+	int i;
 
 	mutex_lock(&monc->mutex);
 
-	if (monc->have_mdsmap)
-		seq_printf(s, "have mdsmap %u\n", (unsigned int)monc->have_mdsmap);
-	if (monc->have_osdmap)
-		seq_printf(s, "have osdmap %u\n", (unsigned int)monc->have_osdmap);
-	if (monc->want_next_osdmap)
-		seq_printf(s, "want next osdmap\n");
+	for (i = 0; i < ARRAY_SIZE(monc->subs); i++) {
+		seq_printf(s, "have %s %u", ceph_sub_str[i],
+			   monc->subs[i].have);
+		if (monc->subs[i].want)
+			seq_printf(s, " want %llu%s",
+				   le64_to_cpu(monc->subs[i].item.start),
+				   (monc->subs[i].item.flags &
+					CEPH_SUBSCRIBE_ONETIME ?  "" : "+"));
+		seq_putc(s, '\n');
+	}
 
 	for (rp = rb_first(&monc->generic_request_tree); rp; rp = rb_next(rp)) {
 		__u16 op;
@@ -177,10 +183,24 @@ static int osdc_show(struct seq_file *s, void *pp)
 	return 0;
 }
 
+static int client_options_show(struct seq_file *s, void *p)
+{
+	struct ceph_client *client = s->private;
+	int ret;
+
+	ret = ceph_print_client_options(s, client);
+	if (ret)
+		return ret;
+
+	seq_putc(s, '\n');
+	return 0;
+}
+
 CEPH_DEFINE_SHOW_FUNC(monmap_show)
 CEPH_DEFINE_SHOW_FUNC(osdmap_show)
 CEPH_DEFINE_SHOW_FUNC(monc_show)
 CEPH_DEFINE_SHOW_FUNC(osdc_show)
+CEPH_DEFINE_SHOW_FUNC(client_options_show)
 
 int ceph_debugfs_init(void)
 {
@@ -242,6 +262,14 @@ int ceph_debugfs_client_init(struct ceph_client *client)
 	if (!client->debugfs_osdmap)
 		goto out;
 
+	client->debugfs_options = debugfs_create_file("client_options",
+					0600,
+					client->debugfs_dir,
+					client,
+					&client_options_show_fops);
+	if (!client->debugfs_options)
+		goto out;
+
 	return 0;
 
 out:
@@ -252,6 +280,7 @@ out:
 void ceph_debugfs_client_cleanup(struct ceph_client *client)
 {
 	dout("ceph_debugfs_client_cleanup %p\n", client);
+	debugfs_remove(client->debugfs_options);
 	debugfs_remove(client->debugfs_osdmap);
 	debugfs_remove(client->debugfs_monmap);
 	debugfs_remove(client->osdc.debugfs_file);

@@ -198,8 +198,8 @@ struct ceph_client_mount {
 #define CEPH_SUBSCRIBE_ONETIME    1  /* i want only 1 update after have */
 
 struct ceph_mon_subscribe_item {
-	__le64 have_version;    __le64 have;
-	__u8 onetime;
+	__le64 start;
+	__u8 flags;
 } __attribute__ ((packed));
 
 struct ceph_mon_subscribe_ack {
@@ -323,6 +323,7 @@ enum {
 	CEPH_MDS_OP_MKSNAP     = 0x01400,
 	CEPH_MDS_OP_RMSNAP     = 0x01401,
 	CEPH_MDS_OP_LSSNAP     = 0x00402,
+	CEPH_MDS_OP_RENAMESNAP = 0x01403,
 };
 
 extern const char *ceph_mds_op_name(int op);
@@ -375,7 +376,8 @@ union ceph_mds_request_args {
 		__le32 stripe_count;         /* ... */
 		__le32 object_size;
 		__le32 file_replication;
-		__le32 unused;               /* used to be preferred osd */
+               __le32 mask;                 /* CEPH_CAP_* */
+               __le32 old_size;
 	} __attribute__ ((packed)) open;
 	struct {
 		__le32 flags;

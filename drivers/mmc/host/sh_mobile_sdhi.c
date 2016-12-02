@@ -1,6 +1,8 @@
 /*
  * SuperH Mobile SDHI
  *
+ * Copyright (C) 2016 Sang Engineering, Wolfram Sang
+ * Copyright (C) 2015-16 Renesas Electronics Corporation
  * Copyright (C) 2009 Magnus Damm
  *
  * This program is free software; you can redistribute it and/or modify
@@ -43,6 +45,7 @@ struct sh_mobile_sdhi_of_data {
 	unsigned long capabilities2;
 	enum dma_slave_buswidth dma_buswidth;
 	dma_addr_t dma_rx_offset;
+	unsigned bus_shift;
 };
 
 static const struct sh_mobile_sdhi_of_data sh_mobile_sdhi_of_cfg[] = {
@@ -59,10 +62,17 @@ static const struct sh_mobile_sdhi_of_data of_rcar_gen1_compatible = {
 
 static const struct sh_mobile_sdhi_of_data of_rcar_gen2_compatible = {
 	.tmio_flags	= TMIO_MMC_HAS_IDLE_WAIT | TMIO_MMC_WRPROTECT_DISABLE |
-			  TMIO_MMC_CLK_ACTUAL,
+			  TMIO_MMC_CLK_ACTUAL | TMIO_MMC_FAST_CLK_CHG,
 	.capabilities	= MMC_CAP_SD_HIGHSPEED | MMC_CAP_SDIO_IRQ,
 	.dma_buswidth	= DMA_SLAVE_BUSWIDTH_4_BYTES,
 	.dma_rx_offset	= 0x2000,
+};
+
+static const struct sh_mobile_sdhi_of_data of_rcar_gen3_compatible = {
+	.tmio_flags	= TMIO_MMC_HAS_IDLE_WAIT | TMIO_MMC_WRPROTECT_DISABLE |
+			  TMIO_MMC_CLK_ACTUAL | TMIO_MMC_FAST_CLK_CHG,
+	.capabilities	= MMC_CAP_SD_HIGHSPEED,
+	.bus_shift	= 2,
 };
 
 static const struct of_device_id sh_mobile_sdhi_of_match[] = {
@@ -78,6 +88,7 @@ static const struct of_device_id sh_mobile_sdhi_of_match[] = {
 	{ .compatible = "renesas,sdhi-r8a7792", .data = &of_rcar_gen2_compatible, },
 	{ .compatible = "renesas,sdhi-r8a7793", .data = &of_rcar_gen2_compatible, },
 	{ .compatible = "renesas,sdhi-r8a7794", .data = &of_rcar_gen2_compatible, },
+	{ .compatible = "renesas,sdhi-r8a7795", .data = &of_rcar_gen3_compatible, },
 	{},
 };
 MODULE_DEVICE_TABLE(of, sh_mobile_sdhi_of_match);
@@ -102,6 +113,15 @@ static void sh_mobile_sdhi_sdbuf_width(struct tmio_mmc_host *host, int width)
 		break;
 	case 0xCB0D:
 		val = (width == 32) ? 0x0000 : 0x0001;
+		break;
+	case 0xCC10: /* Gen3, SD only */
+	case 0xCD10: /* Gen3, SD + MMC */
+		if (width == 64)
+			val = 0x0000;
+		else if (width == 32)
+			val = 0x0101;
+		else
+			val = 0x0001;
 		break;
 	default:
 		/* nothing to do */
@@ -163,6 +183,7 @@ static int sh_mobile_sdhi_write16_hook(struct tmio_mmc_host *host, int addr)
 	case CTL_SD_MEM_CARD_OPT:
 	case CTL_TRANSACTION_CTL:
 	case CTL_DMA_ENABLE:
+	case EXT_ACC:
 		return sh_mobile_sdhi_wait_idle(host);
 	}
 
@@ -201,7 +222,7 @@ static int sh_mobile_sdhi_probe(struct platform_device *pdev)
 		of_match_device(sh_mobile_sdhi_of_match, &pdev->dev);
 	struct sh_mobile_sdhi *priv;
 	struct tmio_mmc_data *mmc_data;
-	struct sh_mobile_sdhi_info *p = pdev->dev.platform_data;
+	struct tmio_mmc_data *mmd = pdev->dev.platform_data;
 	struct tmio_mmc_host *host;
 	struct resource *res;
 	int irq, ret, i = 0;
@@ -213,10 +234,8 @@ static int sh_mobile_sdhi_probe(struct platform_device *pdev)
 		return -EINVAL;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(struct sh_mobile_sdhi), GFP_KERNEL);
-	if (priv == NULL) {
-		dev_err(&pdev->dev, "kzalloc failed\n");
+	if (!priv)
 		return -ENOMEM;
-	}
 
 	mmc_data = &priv->mmc_data;
 	dma_priv = &priv->dma_priv;
@@ -234,41 +253,35 @@ static int sh_mobile_sdhi_probe(struct platform_device *pdev)
 		goto eprobe;
 	}
 
+	if (of_id && of_id->data) {
+		const struct sh_mobile_sdhi_of_data *of_data = of_id->data;
+
+		mmc_data->flags |= of_data->tmio_flags;
+		mmc_data->capabilities |= of_data->capabilities;
+		mmc_data->capabilities2 |= of_data->capabilities2;
+		mmc_data->dma_rx_offset = of_data->dma_rx_offset;
+		dma_priv->dma_buswidth = of_data->dma_buswidth;
+		host->bus_shift = of_data->bus_shift;
+	}
+
 	host->dma		= dma_priv;
 	host->write16_hook	= sh_mobile_sdhi_write16_hook;
 	host->clk_enable	= sh_mobile_sdhi_clk_enable;
 	host->clk_disable	= sh_mobile_sdhi_clk_disable;
 	host->multi_io_quirk	= sh_mobile_sdhi_multi_io_quirk;
-	/* SD control register space size is 0x100, 0x200 for bus_shift=1 */
-	if (resource_size(res) > 0x100)
+
+	/* Orginally registers were 16 bit apart, could be 32 or 64 nowadays */
+	if (!host->bus_shift && resource_size(res) > 0x100) /* old way to determine the shift */
 		host->bus_shift = 1;
-	else
-		host->bus_shift = 0;
 
-	mmc_data->capabilities = MMC_CAP_MMC_HIGHSPEED;
-	if (p) {
-		mmc_data->flags = p->tmio_flags;
-		mmc_data->ocr_mask = p->tmio_ocr_mask;
-		mmc_data->capabilities |= p->tmio_caps;
-		mmc_data->capabilities2 |= p->tmio_caps2;
-		mmc_data->cd_gpio = p->cd_gpio;
+	if (mmd)
+		*mmc_data = *mmd;
 
-		if (p->dma_slave_tx > 0 && p->dma_slave_rx > 0) {
-			/*
-			 * Yes, we have to provide slave IDs twice to TMIO:
-			 * once as a filter parameter and once for channel
-			 * configuration as an explicit slave ID
-			 */
-			dma_priv->chan_priv_tx = (void *)p->dma_slave_tx;
-			dma_priv->chan_priv_rx = (void *)p->dma_slave_rx;
-			dma_priv->slave_id_tx = p->dma_slave_tx;
-			dma_priv->slave_id_rx = p->dma_slave_rx;
-		}
-	}
 	dma_priv->filter = shdma_chan_filter;
 	dma_priv->enable = sh_mobile_sdhi_enable_dma;
 
 	mmc_data->alignment_shift = 1; /* 2-byte alignment */
+	mmc_data->capabilities |= MMC_CAP_MMC_HIGHSPEED;
 
 	/*
 	 * All SDHI blocks support 2-byte and larger block sizes in 4-bit
@@ -290,15 +303,6 @@ static int sh_mobile_sdhi_probe(struct platform_device *pdev)
 	 * All SDHI need SDIO_INFO1 reserved bit
 	 */
 	mmc_data->flags |= TMIO_MMC_SDIO_STATUS_QUIRK;
-
-	if (of_id && of_id->data) {
-		const struct sh_mobile_sdhi_of_data *of_data = of_id->data;
-		mmc_data->flags |= of_data->tmio_flags;
-		mmc_data->capabilities |= of_data->capabilities;
-		mmc_data->capabilities2 |= of_data->capabilities2;
-		mmc_data->dma_rx_offset = of_data->dma_rx_offset;
-		dma_priv->dma_buswidth = of_data->dma_buswidth;
-	}
 
 	ret = tmio_mmc_host_probe(host, mmc_data);
 	if (ret < 0)

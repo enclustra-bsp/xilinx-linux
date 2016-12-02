@@ -1,6 +1,6 @@
 config VIDEO_XILINX
 	tristate "Xilinx Video IP (EXPERIMENTAL)"
-	depends on VIDEO_V4L2 && VIDEO_V4L2_SUBDEV_API && OF
+	depends on VIDEO_V4L2 && VIDEO_V4L2_SUBDEV_API && OF && HAS_DMA
 	select VIDEOBUF2_DMA_CONTIG
 	---help---
 	  Driver for Xilinx Video IP Pipelines
@@ -61,5 +61,11 @@ config VIDEO_XILINX_VTC
 	depends on VIDEO_XILINX
 	---help---
 	   Driver for the Xilinx Video Timing Controller
+
+config VIDEO_XILINX_CSI2RXSS
+	tristate "Xilinx CSI2 Rx Subsystem"
+	depends on VIDEO_XILINX
+	---help---
+	Driver for Xilinx MIPI CSI2 Rx Subsystem
 
 endif #VIDEO_XILINX

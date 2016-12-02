@@ -18,9 +18,20 @@
 #include <linux/atomic.h>
 #include <linux/rcupdate.h>
 #include <linux/uidgid.h>
+#include <linux/utsname.h>
 
-/* size of the nodename buffer */
-#define UNX_MAXNODENAME	32
+/*
+ * Maximum size of AUTH_NONE authentication information, in XDR words.
+ */
+#define NUL_CALLSLACK	(4)
+#define NUL_REPLYSLACK	(2)
+
+/*
+ * Size of the nodename buffer. RFC1831 specifies a hard limit of 255 bytes,
+ * but Linux hostnames are actually limited to __NEW_UTS_LEN bytes.
+ */
+#define UNX_MAXNODENAME	__NEW_UTS_LEN
+#define UNX_CALLSLACK	(21 + XDR_QUADLEN(UNX_MAXNODENAME))
 
 struct rpcsec_gss_info;
 

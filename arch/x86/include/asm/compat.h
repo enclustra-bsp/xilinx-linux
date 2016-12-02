@@ -301,7 +301,7 @@ static inline void __user *arch_compat_alloc_user_space(long len)
 		sp = task_pt_regs(current)->sp;
 	} else {
 		/* -128 for the x32 ABI redzone */
-		sp = this_cpu_read(old_rsp) - 128;
+		sp = task_pt_regs(current)->sp - 128;
 	}
 
 	return (void __user *)round_down(sp - len, 16);
@@ -316,9 +316,10 @@ static inline bool is_x32_task(void)
 	return false;
 }
 
-static inline bool is_compat_task(void)
+static inline bool in_compat_syscall(void)
 {
 	return is_ia32_task() || is_x32_task();
 }
+#define in_compat_syscall in_compat_syscall	/* override the generic impl */
 
 #endif /* _ASM_X86_COMPAT_H */

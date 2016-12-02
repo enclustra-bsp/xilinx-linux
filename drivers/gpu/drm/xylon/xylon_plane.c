@@ -149,8 +149,10 @@ static int xylon_drm_plane_update(struct drm_plane *base_plane,
 {
 	int ret;
 
-	crtc->x = crtc_x;
-	crtc->y = crtc_y;
+	if (base_plane->type == DRM_PLANE_TYPE_PRIMARY) {
+		crtc->x = crtc_x;
+		crtc->y = crtc_y;
+	}
 
 	ret = xylon_drm_plane_fb_set(base_plane, fb,
 				     crtc_x, crtc_y, crtc_w, crtc_h,
@@ -343,7 +345,7 @@ xylon_drm_plane_create(struct xylon_drm_plane_manager *manager,
 
 	ret = drm_universal_plane_init(manager->dev, &plane->base,
 				       possible_crtcs, &xylon_drm_plane_funcs,
-				       &format, 1, type);
+				       &format, 1, type, NULL);
 	if (ret) {
 		DRM_ERROR("failed initialize plane\n");
 		goto err_init;

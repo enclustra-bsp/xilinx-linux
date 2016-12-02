@@ -24,11 +24,6 @@
 
 #include "io-pgtable.h"
 
-extern struct io_pgtable_init_fns io_pgtable_arm_32_lpae_s1_init_fns;
-extern struct io_pgtable_init_fns io_pgtable_arm_32_lpae_s2_init_fns;
-extern struct io_pgtable_init_fns io_pgtable_arm_64_lpae_s1_init_fns;
-extern struct io_pgtable_init_fns io_pgtable_arm_64_lpae_s2_init_fns;
-
 static const struct io_pgtable_init_fns *
 io_pgtable_init_table[IO_PGTABLE_NUM_FMTS] =
 {
@@ -37,6 +32,9 @@ io_pgtable_init_table[IO_PGTABLE_NUM_FMTS] =
 	[ARM_32_LPAE_S2] = &io_pgtable_arm_32_lpae_s2_init_fns,
 	[ARM_64_LPAE_S1] = &io_pgtable_arm_64_lpae_s1_init_fns,
 	[ARM_64_LPAE_S2] = &io_pgtable_arm_64_lpae_s2_init_fns,
+#endif
+#ifdef CONFIG_IOMMU_IO_PGTABLE_ARMV7S
+	[ARM_V7S] = &io_pgtable_arm_v7s_init_fns,
 #endif
 };
 
@@ -77,6 +75,6 @@ void free_io_pgtable_ops(struct io_pgtable_ops *ops)
 		return;
 
 	iop = container_of(ops, struct io_pgtable, ops);
-	iop->cfg.tlb->tlb_flush_all(iop->cookie);
+	io_pgtable_tlb_flush_all(iop);
 	io_pgtable_init_table[iop->fmt]->free(iop);
 }

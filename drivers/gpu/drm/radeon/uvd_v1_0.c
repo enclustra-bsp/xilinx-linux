@@ -466,18 +466,8 @@ bool uvd_v1_0_semaphore_emit(struct radeon_device *rdev,
 			     struct radeon_semaphore *semaphore,
 			     bool emit_wait)
 {
-	uint64_t addr = semaphore->gpu_addr;
-
-	radeon_ring_write(ring, PACKET0(UVD_SEMA_ADDR_LOW, 0));
-	radeon_ring_write(ring, (addr >> 3) & 0x000FFFFF);
-
-	radeon_ring_write(ring, PACKET0(UVD_SEMA_ADDR_HIGH, 0));
-	radeon_ring_write(ring, (addr >> 23) & 0x000FFFFF);
-
-	radeon_ring_write(ring, PACKET0(UVD_SEMA_CMD, 0));
-	radeon_ring_write(ring, emit_wait ? 1 : 0);
-
-	return true;
+	/* disable semaphores for UVD V1 hardware */
+	return false;
 }
 
 /**
@@ -532,11 +522,17 @@ int uvd_v1_0_ib_test(struct radeon_device *rdev, struct radeon_ring *ring)
 		goto error;
 	}
 
-	r = radeon_fence_wait(fence, false);
-	if (r) {
+	r = radeon_fence_wait_timeout(fence, false, usecs_to_jiffies(
+		RADEON_USEC_IB_TEST_TIMEOUT));
+	if (r < 0) {
 		DRM_ERROR("radeon: fence wait failed (%d).\n", r);
 		goto error;
+	} else if (r == 0) {
+		DRM_ERROR("radeon: fence wait timed out.\n");
+		r = -ETIMEDOUT;
+		goto error;
 	}
+	r = 0;
 	DRM_INFO("ib test on ring %d succeeded\n",  ring->idx);
 error:
 	radeon_fence_unref(&fence);

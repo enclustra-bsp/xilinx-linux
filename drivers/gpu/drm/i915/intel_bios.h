@@ -25,27 +25,43 @@
  *
  */
 
-#ifndef _I830_BIOS_H_
-#define _I830_BIOS_H_
+#ifndef _INTEL_BIOS_H_
+#define _INTEL_BIOS_H_
 
-#include <drm/drmP.h>
-
+/**
+ * struct vbt_header - VBT Header structure
+ * @signature:		VBT signature, always starts with "$VBT"
+ * @version:		Version of this structure
+ * @header_size:	Size of this structure
+ * @vbt_size:		Size of VBT (VBT Header, BDB Header and data blocks)
+ * @vbt_checksum:	Checksum
+ * @reserved0:		Reserved
+ * @bdb_offset:		Offset of &struct bdb_header from beginning of VBT
+ * @aim_offset:		Offsets of add-in data blocks from beginning of VBT
+ */
 struct vbt_header {
-	u8 signature[20];		/**< Always starts with 'VBT$' */
-	u16 version;			/**< decimal */
-	u16 header_size;		/**< in bytes */
-	u16 vbt_size;			/**< in bytes */
+	u8 signature[20];
+	u16 version;
+	u16 header_size;
+	u16 vbt_size;
 	u8 vbt_checksum;
 	u8 reserved0;
-	u32 bdb_offset;			/**< from beginning of VBT */
-	u32 aim_offset[4];		/**< from beginning of VBT */
+	u32 bdb_offset;
+	u32 aim_offset[4];
 } __packed;
 
+/**
+ * struct bdb_header - BDB Header structure
+ * @signature:		BDB signature "BIOS_DATA_BLOCK"
+ * @version:		Version of the data block definitions
+ * @header_size:	Size of this structure
+ * @bdb_size:		Size of BDB (BDB Header and data blocks)
+ */
 struct bdb_header {
-	u8 signature[16];		/**< Always 'BIOS_DATA_BLOCK' */
-	u16 version;			/**< decimal */
-	u16 header_size;		/**< in bytes */
-	u16 bdb_size;			/**< in bytes */
+	u8 signature[16];
+	u16 version;
+	u16 header_size;
+	u16 bdb_size;
 } __packed;
 
 /* strictly speaking, this is a "skip" block, but it has interesting info */
@@ -203,9 +219,11 @@ struct bdb_general_features {
 #define DEVICE_PORT_DVOB	0x01
 #define DEVICE_PORT_DVOC	0x02
 
-/* We used to keep this struct but without any version control. We should avoid
+/*
+ * We used to keep this struct but without any version control. We should avoid
  * using it in the future, but it should be safe to keep using it in the old
- * code. */
+ * code. Do not change; we rely on its size.
+ */
 struct old_child_dev_config {
 	u16 handle;
 	u16 device_type;
@@ -231,6 +249,10 @@ struct old_child_dev_config {
 /* This one contains field offsets that are known to be common for all BDB
  * versions. Notice that the meaning of the contents contents may still change,
  * but at least the offsets are consistent. */
+
+/* Definitions for flags_1 */
+#define IBOOST_ENABLE (1<<3)
+
 struct common_child_dev_config {
 	u16 handle;
 	u16 device_type;
@@ -239,7 +261,12 @@ struct common_child_dev_config {
 	u8 not_common2[2];
 	u8 ddc_pin;
 	u16 edid_ptr;
+	u8 obsolete;
+	u8 flags_1;
+	u8 not_common3[13];
+	u8 iboost_level;
 } __packed;
+
 
 /* This field changes depending on the BDB version, so the most reliable way to
  * read it is by checking the BDB version and reading the raw pointer. */
@@ -277,9 +304,9 @@ struct bdb_general_definitions {
 	 * And the device num is related with the size of general definition
 	 * block. It is obtained by using the following formula:
 	 * number = (block_size - sizeof(bdb_general_definitions))/
-	 *	     sizeof(child_device_config);
+	 *	     defs->child_dev_size;
 	 */
-	union child_device_config devices[0];
+	uint8_t devices[0];
 } __packed;
 
 /* Mask for DRRS / Panel Channel / SSC / BLT control bits extraction */
@@ -554,6 +581,7 @@ struct bdb_edp {
 	/* ith bit indicates enabled/disabled for (i+1)th panel */
 	u16 edp_s3d_feature;
 	u16 edp_t3_optimization;
+	u64 edp_vswing_preemph;		/* v173 */
 } __packed;
 
 struct psr_table {
@@ -575,9 +603,6 @@ struct psr_table {
 struct bdb_psr {
 	struct psr_table psr_table[16];
 } __packed;
-
-void intel_setup_bios(struct drm_device *dev);
-int intel_parse_bios(struct drm_device *dev);
 
 /*
  * Driver<->VBIOS interaction occurs through scratch bits in
@@ -730,7 +755,6 @@ int intel_parse_bios(struct drm_device *dev);
  */
 #define DEVICE_TYPE_eDP_BITS \
 	(DEVICE_TYPE_INTERNAL_CONNECTOR | \
-	 DEVICE_TYPE_NOT_HDMI_OUTPUT | \
 	 DEVICE_TYPE_MIPI_OUTPUT | \
 	 DEVICE_TYPE_COMPOSITE_OUTPUT | \
 	 DEVICE_TYPE_DUAL_CHANNEL | \
@@ -738,18 +762,12 @@ int intel_parse_bios(struct drm_device *dev);
 	 DEVICE_TYPE_TMDS_DVI_SIGNALING | \
 	 DEVICE_TYPE_VIDEO_SIGNALING | \
 	 DEVICE_TYPE_DISPLAYPORT_OUTPUT | \
-	 DEVICE_TYPE_DIGITAL_OUTPUT | \
 	 DEVICE_TYPE_ANALOG_OUTPUT)
 
 /* define the DVO port for HDMI output type */
 #define		DVO_B		1
 #define		DVO_C		2
 #define		DVO_D		3
-
-/* define the PORT for DP output type */
-#define		PORT_IDPB	7
-#define		PORT_IDPC	8
-#define		PORT_IDPD	9
 
 /* Possible values for the "DVO Port" field for versions >= 155: */
 #define DVO_PORT_HDMIA	0
@@ -763,6 +781,8 @@ int intel_parse_bios(struct drm_device *dev);
 #define DVO_PORT_DPC	8
 #define DVO_PORT_DPD	9
 #define DVO_PORT_DPA	10
+#define DVO_PORT_DPE	11
+#define DVO_PORT_HDMIE	12
 #define DVO_PORT_MIPIA	21
 #define DVO_PORT_MIPIB	22
 #define DVO_PORT_MIPIC	23
@@ -776,6 +796,13 @@ int intel_parse_bios(struct drm_device *dev);
 
 #define MIPI_DSI_UNDEFINED_PANEL_ID	0
 #define MIPI_DSI_GENERIC_PANEL_ID	1
+
+/*
+ * PMIC vs SoC Backlight support specified in pwm_blc
+ * field in mipi_config block below.
+*/
+#define PPS_BLC_PMIC   0
+#define PPS_BLC_SOC    1
 
 struct mipi_config {
 	u16 panel_id;
@@ -927,21 +954,29 @@ struct bdb_mipi_sequence {
 
 /* MIPI Sequnece Block definitions */
 enum mipi_seq {
-	MIPI_SEQ_UNDEFINED = 0,
+	MIPI_SEQ_END = 0,
 	MIPI_SEQ_ASSERT_RESET,
 	MIPI_SEQ_INIT_OTP,
 	MIPI_SEQ_DISPLAY_ON,
 	MIPI_SEQ_DISPLAY_OFF,
 	MIPI_SEQ_DEASSERT_RESET,
+	MIPI_SEQ_BACKLIGHT_ON,		/* sequence block v2+ */
+	MIPI_SEQ_BACKLIGHT_OFF,		/* sequence block v2+ */
+	MIPI_SEQ_TEAR_ON,		/* sequence block v2+ */
+	MIPI_SEQ_TEAR_OFF,		/* sequence block v3+ */
+	MIPI_SEQ_POWER_ON,		/* sequence block v3+ */
+	MIPI_SEQ_POWER_OFF,		/* sequence block v3+ */
 	MIPI_SEQ_MAX
 };
 
 enum mipi_seq_element {
-	MIPI_SEQ_ELEM_UNDEFINED = 0,
+	MIPI_SEQ_ELEM_END = 0,
 	MIPI_SEQ_ELEM_SEND_PKT,
 	MIPI_SEQ_ELEM_DELAY,
 	MIPI_SEQ_ELEM_GPIO,
-	MIPI_SEQ_ELEM_STATUS,
+	MIPI_SEQ_ELEM_I2C,		/* sequence block v2+ */
+	MIPI_SEQ_ELEM_SPI,		/* sequence block v3+ */
+	MIPI_SEQ_ELEM_PMIC,		/* sequence block v3+ */
 	MIPI_SEQ_ELEM_MAX
 };
 
@@ -956,4 +991,4 @@ enum mipi_gpio_pin_index {
 	MIPI_GPIO_MAX
 };
 
-#endif /* _I830_BIOS_H_ */
+#endif /* _INTEL_BIOS_H_ */

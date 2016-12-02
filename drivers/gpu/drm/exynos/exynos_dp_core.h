@@ -16,6 +16,7 @@
 #include <drm/drm_crtc.h>
 #include <drm/drm_dp_helper.h>
 #include <drm/exynos_drm.h>
+#include <video/videomode.h>
 
 #include "exynos_drm_drv.h"
 
@@ -147,13 +148,13 @@ struct link_train {
 };
 
 struct exynos_dp_device {
-	struct exynos_drm_display display;
+	struct drm_encoder	encoder;
 	struct device		*dev;
 	struct drm_device	*drm_dev;
 	struct drm_connector	connector;
-	struct drm_encoder	*encoder;
 	struct drm_panel	*panel;
 	struct drm_bridge	*bridge;
+	struct drm_bridge	*ptn_bridge;
 	struct clk		*clock;
 	unsigned int		irq;
 	void __iomem		*reg_base;
@@ -164,8 +165,7 @@ struct exynos_dp_device {
 	struct phy		*phy;
 	int			dpms_mode;
 	int			hpd_gpio;
-
-	struct exynos_drm_panel_info priv;
+	struct videomode	vm;
 };
 
 /* exynos_dp_reg.c */

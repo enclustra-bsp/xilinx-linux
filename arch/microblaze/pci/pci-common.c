@@ -673,10 +673,10 @@ void pci_process_bridge_OF_ranges(struct pci_controller *hose,
 	}
 }
 
-/* Decide whether to display the domain number in /proc */
+/* Display the domain number in /proc */
 int pci_proc_domain(struct pci_bus *bus)
 {
-	return 0;
+	return pci_domain_nr(bus);
 }
 
 /* This header fixup will do the resource fixup for all devices as they are
@@ -822,10 +822,7 @@ void pcibios_setup_bus_devices(struct pci_bus *bus)
 
 void pcibios_fixup_bus(struct pci_bus *bus)
 {
-	/* When called from the generic PCI probe, read PCI<->PCI bridge
-	 * bases. This is -not- called when generating the PCI tree from
-	 * the OF device-tree.
-	 */
+	/* nothing to do */
 }
 EXPORT_SYMBOL(pcibios_fixup_bus);
 
@@ -845,9 +842,7 @@ EXPORT_SYMBOL(pcibios_fixup_bus);
 resource_size_t pcibios_align_resource(void *data, const struct resource *res,
 				resource_size_t size, resource_size_t align)
 {
-	resource_size_t start = res->start;
-
-	return start;
+	return res->start;
 }
 EXPORT_SYMBOL(pcibios_align_resource);
 
@@ -1279,25 +1274,6 @@ static void pcibios_setup_phb_resources(struct pci_controller *hose,
 		 (unsigned long)hose->io_base_virt - _IO_BASE);
 }
 
-struct device_node *pcibios_get_phb_of_node(struct pci_bus *bus)
-{
-	struct device_node *np;
-
-	for_each_node_by_type(np, "pci") {
-		const void *prop;
-		unsigned int bus_min;
-
-		prop = of_get_property(np, "bus-range", NULL);
-		if (!prop)
-			continue;
-		bus_min = be32_to_cpup(prop);
-		if (bus->number == bus_min)
-			return np;
-	}
-
-	return NULL;
-}
-
 static void pcibios_scan_phb(struct pci_controller *hose)
 {
 	LIST_HEAD(resources);
@@ -1340,6 +1316,10 @@ static int __init pcibios_init(void)
 
 	/* Call common code to handle resource allocation */
 	pcibios_resource_survey();
+	list_for_each_entry_safe(hose, tmp, &hose_list, list_node) {
+		if (hose->bus)
+			pci_bus_add_devices(hose->bus);
+	}
 
 	return 0;
 }

@@ -49,6 +49,8 @@ struct cpuinfo_mips {
 	unsigned int		udelay_val;
 	unsigned int		processor_id;
 	unsigned int		fpu_id;
+	unsigned int		fpu_csr31;
+	unsigned int		fpu_msk31;
 	unsigned int		msa_id;
 	unsigned int		cputype;
 	int			isa_level;
@@ -100,7 +102,7 @@ extern void cpu_probe(void);
 extern void cpu_report(void);
 
 extern const char *__cpu_name[];
-#define cpu_name_string()	__cpu_name[smp_processor_id()]
+#define cpu_name_string()	__cpu_name[raw_smp_processor_id()]
 
 struct seq_file;
 struct notifier_block;

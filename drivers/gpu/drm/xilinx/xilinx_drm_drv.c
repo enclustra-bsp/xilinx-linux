@@ -53,6 +53,7 @@ struct xilinx_drm_private {
 	struct drm_crtc *crtc;
 	struct drm_fb_helper *fb;
 	struct platform_device *pdev;
+	bool is_master;
 };
 
 /**
@@ -72,15 +73,30 @@ struct xilinx_video_format_desc {
 };
 
 static const struct xilinx_video_format_desc xilinx_video_formats[] = {
-	{ "yuv422", 16, 16, XILINX_VIDEO_FORMAT_YUV422, DRM_FORMAT_YUYV },
-	{ "yuv444", 24, 24, XILINX_VIDEO_FORMAT_YUV444, DRM_FORMAT_YUV444 },
-	{ "rgb888", 24, 24, XILINX_VIDEO_FORMAT_RGB, DRM_FORMAT_RGB888 },
 	{ "yuv420", 16, 16, XILINX_VIDEO_FORMAT_YUV420, DRM_FORMAT_YUV420 },
-	{ "xrgb8888", 24, 32, XILINX_VIDEO_FORMAT_XRGB, DRM_FORMAT_XRGB8888 },
-	{ "rgba8888", 32, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_RGBA8888 },
+	{ "uvy422", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_UYVY },
+	{ "vuy422", 16, 16, XILINX_VIDEO_FORMAT_YUV422, DRM_FORMAT_VYUY },
+	{ "yuv422", 16, 16, XILINX_VIDEO_FORMAT_YUV422, DRM_FORMAT_YUYV },
+	{ "yvu422", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_YVYU },
+	{ "yuv444", 24, 24, XILINX_VIDEO_FORMAT_YUV444, DRM_FORMAT_YUV444 },
+	{ "nv12", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_NV12 },
+	{ "nv21", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_NV21 },
+	{ "nv16", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_NV16 },
+	{ "nv61", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_NV61 },
+	{ "abgr1555", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_ABGR1555 },
+	{ "argb1555", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_ARGB1555 },
+	{ "rgba4444", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_RGBA4444 },
+	{ "bgra4444", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_BGRA4444 },
+	{ "bgr565", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_BGR565 },
 	{ "rgb565", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_RGB565 },
+	{ "bgr888", 24, 24, XILINX_VIDEO_FORMAT_RGB, DRM_FORMAT_BGR888 },
+	{ "rgb888", 24, 24, XILINX_VIDEO_FORMAT_RGB, DRM_FORMAT_RGB888 },
 	{ "xbgr8888", 24, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_XBGR8888 },
+	{ "xrgb8888", 24, 32, XILINX_VIDEO_FORMAT_XRGB, DRM_FORMAT_XRGB8888 },
 	{ "abgr8888", 32, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_ABGR8888 },
+	{ "argb8888", 32, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_ARGB8888 },
+	{ "bgra8888", 32, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_BGRA8888 },
+	{ "rgba8888", 32, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_RGBA8888 },
 };
 
 /**
@@ -129,6 +145,14 @@ unsigned int xilinx_drm_get_align(struct drm_device *drm)
 	return xilinx_drm_crtc_get_align(private->crtc);
 }
 
+void xilinx_drm_set_config(struct drm_device *drm, struct drm_mode_set *set)
+{
+	struct xilinx_drm_private *private = drm->dev_private;
+
+	if (private && private->fb)
+		xilinx_drm_fb_set_config(private->fb, set);
+}
+
 /* poll changed handler */
 static void xilinx_drm_output_poll_changed(struct drm_device *drm)
 {
@@ -143,7 +167,7 @@ static const struct drm_mode_config_funcs xilinx_drm_mode_config_funcs = {
 };
 
 /* enable vblank */
-static int xilinx_drm_enable_vblank(struct drm_device *drm, int crtc)
+static int xilinx_drm_enable_vblank(struct drm_device *drm, unsigned int crtc)
 {
 	struct xilinx_drm_private *private = drm->dev_private;
 
@@ -153,7 +177,7 @@ static int xilinx_drm_enable_vblank(struct drm_device *drm, int crtc)
 }
 
 /* disable vblank */
-static void xilinx_drm_disable_vblank(struct drm_device *drm, int crtc)
+static void xilinx_drm_disable_vblank(struct drm_device *drm, unsigned int crtc)
 {
 	struct xilinx_drm_private *private = drm->dev_private;
 
@@ -355,6 +379,19 @@ static int xilinx_drm_unload(struct drm_device *drm)
 	return 0;
 }
 
+int xilinx_drm_open(struct drm_device *dev, struct drm_file *file)
+{
+	struct xilinx_drm_private *private = dev->dev_private;
+
+	if (!(drm_is_primary_client(file) && !file->minor->master) &&
+			capable(CAP_SYS_ADMIN)) {
+		file->is_master = 1;
+		private->is_master = true;
+	}
+
+	return 0;
+}
+
 /* preclose */
 static void xilinx_drm_preclose(struct drm_device *drm, struct drm_file *file)
 {
@@ -362,6 +399,11 @@ static void xilinx_drm_preclose(struct drm_device *drm, struct drm_file *file)
 
 	/* cancel pending page flip request */
 	xilinx_drm_crtc_cancel_page_flip(private->crtc, file);
+
+	if (private->is_master) {
+		private->is_master = false;
+		file->is_master = 0;
+	}
 }
 
 /* restore the default mode when xilinx drm is released */
@@ -372,6 +414,11 @@ static void xilinx_drm_lastclose(struct drm_device *drm)
 	xilinx_drm_crtc_restore(private->crtc);
 
 	xilinx_drm_fb_restore_mode(private->fb);
+}
+
+static int xilinx_drm_set_busid(struct drm_device *dev, struct drm_master *master)
+{
+	return 0;
 }
 
 static const struct file_operations xilinx_drm_fops = {
@@ -393,11 +440,12 @@ static struct drm_driver xilinx_drm_driver = {
 					  DRIVER_PRIME,
 	.load				= xilinx_drm_load,
 	.unload				= xilinx_drm_unload,
+	.open				= xilinx_drm_open,
 	.preclose			= xilinx_drm_preclose,
 	.lastclose			= xilinx_drm_lastclose,
-	.set_busid			= drm_platform_set_busid,
+	.set_busid			= xilinx_drm_set_busid,
 
-	.get_vblank_counter		= drm_vblank_count,
+	.get_vblank_counter		= drm_vblank_no_hw_counter,
 	.enable_vblank			= xilinx_drm_enable_vblank,
 	.disable_vblank			= xilinx_drm_disable_vblank,
 
@@ -425,7 +473,7 @@ static struct drm_driver xilinx_drm_driver = {
 	.minor				= DRIVER_MINOR,
 };
 
-#if defined(CONFIG_PM_SLEEP) || defined(CONFIG_PM_RUNTIME)
+#if defined(CONFIG_PM_SLEEP)
 /* suspend xilinx drm */
 static int xilinx_drm_pm_suspend(struct device *dev)
 {
@@ -433,8 +481,8 @@ static int xilinx_drm_pm_suspend(struct device *dev)
 	struct drm_device *drm = private->drm;
 	struct drm_connector *connector;
 
-	drm_modeset_lock_all(drm);
 	drm_kms_helper_poll_disable(drm);
+	drm_modeset_lock_all(drm);
 	list_for_each_entry(connector, &drm->mode_config.connector_list, head) {
 		int old_dpms = connector->dpms;
 
@@ -465,7 +513,7 @@ static int xilinx_drm_pm_resume(struct device *dev)
 			connector->funcs->dpms(connector, dpms);
 		}
 	}
-	drm_kms_helper_poll_enable(drm);
+	drm_kms_helper_poll_enable_locked(drm);
 	drm_modeset_unlock_all(drm);
 
 	return 0;
@@ -474,7 +522,6 @@ static int xilinx_drm_pm_resume(struct device *dev)
 
 static const struct dev_pm_ops xilinx_drm_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(xilinx_drm_pm_suspend, xilinx_drm_pm_resume)
-	SET_RUNTIME_PM_OPS(xilinx_drm_pm_suspend, xilinx_drm_pm_resume, NULL)
 };
 
 /* init xilinx drm platform */

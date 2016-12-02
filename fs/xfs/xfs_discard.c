@@ -84,7 +84,7 @@ xfs_trim_extents(
 		error = xfs_alloc_get_rec(cur, &fbno, &flen, &i);
 		if (error)
 			goto out_del_cursor;
-		XFS_WANT_CORRUPTED_GOTO(i == 1, out_del_cursor);
+		XFS_WANT_CORRUPTED_GOTO(mp, i == 1, out_del_cursor);
 		ASSERT(flen <= be32_to_cpu(XFS_BUF_TO_AGF(agbp)->agf_longest));
 
 		/*
@@ -227,7 +227,7 @@ xfs_discard_extents(
 				GFP_NOFS, 0);
 		if (error && error != -EOPNOTSUPP) {
 			xfs_info(mp,
-	 "discard failed for extent [0x%llu,%u], error %d",
+	 "discard failed for extent [0x%llx,%u], error %d",
 				 (unsigned long long)busyp->bno,
 				 busyp->length,
 				 error);

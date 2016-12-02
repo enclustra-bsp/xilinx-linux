@@ -20,11 +20,15 @@
 #include <linux/kvm_types.h>
 #include <linux/kvm_host.h>
 #include <linux/kvm.h>
+#include <linux/seqlock.h>
 #include <asm/debug.h>
 #include <asm/cpu.h>
+#include <asm/fpu/api.h>
 #include <asm/isc.h>
 
-#define KVM_MAX_VCPUS 64
+#define KVM_S390_BSCA_CPU_SLOTS 64
+#define KVM_S390_ESCA_CPU_SLOTS 248
+#define KVM_MAX_VCPUS KVM_S390_ESCA_CPU_SLOTS
 #define KVM_USER_MEM_SLOTS 32
 
 /*
@@ -34,13 +38,43 @@
  */
 #define KVM_NR_IRQCHIPS 1
 #define KVM_IRQCHIP_NUM_PINS 4096
+#define KVM_HALT_POLL_NS_DEFAULT 0
+
+/* s390-specific vcpu->requests bit members */
+#define KVM_REQ_ENABLE_IBS         8
+#define KVM_REQ_DISABLE_IBS        9
 
 #define SIGP_CTRL_C		0x80
 #define SIGP_CTRL_SCN_MASK	0x3f
 
-struct sca_entry {
+union bsca_sigp_ctrl {
+	__u8 value;
+	struct {
+		__u8 c : 1;
+		__u8 r : 1;
+		__u8 scn : 6;
+	};
+} __packed;
+
+union esca_sigp_ctrl {
+	__u16 value;
+	struct {
+		__u8 c : 1;
+		__u8 reserved: 7;
+		__u8 scn;
+	};
+} __packed;
+
+struct esca_entry {
+	union esca_sigp_ctrl sigp_ctrl;
+	__u16   reserved1[3];
+	__u64   sda;
+	__u64   reserved2[6];
+} __packed;
+
+struct bsca_entry {
 	__u8	reserved0;
-	__u8	sigp_ctrl;
+	union bsca_sigp_ctrl	sigp_ctrl;
 	__u16	reserved[3];
 	__u64	sda;
 	__u64	reserved2[2];
@@ -55,13 +89,21 @@ union ipte_control {
 	};
 };
 
-struct sca_block {
+struct bsca_block {
 	union ipte_control ipte_control;
 	__u64	reserved[5];
 	__u64	mcn;
 	__u64	reserved2;
-	struct sca_entry cpu[64];
+	struct bsca_entry cpu[KVM_S390_BSCA_CPU_SLOTS];
 } __attribute__((packed));
+
+struct esca_block {
+	union ipte_control ipte_control;
+	__u64   reserved1[7];
+	__u64   mcn[4];
+	__u64   reserved2[20];
+	struct esca_entry cpu[KVM_S390_ESCA_CPU_SLOTS];
+} __packed;
 
 #define CPUSTAT_STOPPED    0x80000000
 #define CPUSTAT_WAIT       0x10000000
@@ -80,6 +122,7 @@ struct sca_block {
 #define CPUSTAT_MCDS       0x00000100
 #define CPUSTAT_SM         0x00000080
 #define CPUSTAT_IBS        0x00000040
+#define CPUSTAT_GED2       0x00000010
 #define CPUSTAT_G          0x00000008
 #define CPUSTAT_GED        0x00000004
 #define CPUSTAT_J          0x00000002
@@ -95,7 +138,8 @@ struct kvm_s390_sie_block {
 #define PROG_IN_SIE (1<<0)
 	__u32	prog0c;			/* 0x000c */
 	__u8	reserved10[16];		/* 0x0010 */
-#define PROG_BLOCK_SIE 0x00000001
+#define PROG_BLOCK_SIE	(1<<0)
+#define PROG_REQUEST	(1<<1)
 	atomic_t prog20;		/* 0x0020 */
 	__u8	reserved24[4];		/* 0x0024 */
 	__u64	cputm;			/* 0x0028 */
@@ -172,11 +216,14 @@ struct kvm_s390_sie_block {
 	__u32	fac;			/* 0x01a0 */
 	__u8	reserved1a4[20];	/* 0x01a4 */
 	__u64	cbrlo;			/* 0x01b8 */
-	__u8	reserved1c0[30];	/* 0x01c0 */
+	__u8	reserved1c0[8];		/* 0x01c0 */
+	__u32	ecd;			/* 0x01c8 */
+	__u8	reserved1cc[18];	/* 0x01cc */
 	__u64	pp;			/* 0x01de */
 	__u8	reserved1e6[2];		/* 0x01e6 */
 	__u64	itdba;			/* 0x01e8 */
-	__u8	reserved1f0[16];	/* 0x01f0 */
+	__u64   riccbd;			/* 0x01f0 */
+	__u8    reserved1f8[8];		/* 0x01f8 */
 } __attribute__((packed));
 
 struct kvm_s390_itdb {
@@ -199,6 +246,7 @@ struct kvm_vcpu_stat {
 	u32 exit_validity;
 	u32 exit_instruction;
 	u32 halt_successful_poll;
+	u32 halt_attempted_poll;
 	u32 halt_wakeup;
 	u32 instruction_lctl;
 	u32 instruction_lctlg;
@@ -238,6 +286,7 @@ struct kvm_vcpu_stat {
 	u32 instruction_sigp_stop;
 	u32 instruction_sigp_stop_store_status;
 	u32 instruction_sigp_store_status;
+	u32 instruction_sigp_store_adtl_status;
 	u32 instruction_sigp_arch;
 	u32 instruction_sigp_prefix;
 	u32 instruction_sigp_restart;
@@ -247,6 +296,9 @@ struct kvm_vcpu_stat {
 	u32 diagnose_10;
 	u32 diagnose_44;
 	u32 diagnose_9c;
+	u32 diagnose_258;
+	u32 diagnose_308;
+	u32 diagnose_500;
 };
 
 #define PGM_OPERATION			0x01
@@ -270,6 +322,7 @@ struct kvm_vcpu_stat {
 #define PGM_SPECIAL_OPERATION		0x13
 #define PGM_OPERAND			0x15
 #define PGM_TRACE_TABEL			0x16
+#define PGM_VECTOR_PROCESSING		0x1b
 #define PGM_SPACE_SWITCH		0x1c
 #define PGM_HFP_SQUARE_ROOT		0x1d
 #define PGM_PC_TRANSLATION_SPEC		0x1f
@@ -333,6 +386,11 @@ enum irq_types {
 	IRQ_PEND_SET_PREFIX,
 	IRQ_PEND_COUNT
 };
+
+/* We have 2M for virtio device descriptor pages. Smallest amount of
+ * memory per page is 24 bytes (1 queue), so (2048*1024) / 24 = 87381
+ */
+#define KVM_S390_MAX_VIRTIO_IRQS 87381
 
 /*
  * Repressible (non-floating) machine check interrupts
@@ -404,20 +462,39 @@ struct kvm_s390_irq_payload {
 struct kvm_s390_local_interrupt {
 	spinlock_t lock;
 	struct kvm_s390_float_interrupt *float_int;
-	wait_queue_head_t *wq;
+	struct swait_queue_head *wq;
 	atomic_t *cpuflags;
 	DECLARE_BITMAP(sigp_emerg_pending, KVM_MAX_VCPUS);
 	struct kvm_s390_irq_payload irq;
 	unsigned long pending_irqs;
 };
 
+#define FIRQ_LIST_IO_ISC_0 0
+#define FIRQ_LIST_IO_ISC_1 1
+#define FIRQ_LIST_IO_ISC_2 2
+#define FIRQ_LIST_IO_ISC_3 3
+#define FIRQ_LIST_IO_ISC_4 4
+#define FIRQ_LIST_IO_ISC_5 5
+#define FIRQ_LIST_IO_ISC_6 6
+#define FIRQ_LIST_IO_ISC_7 7
+#define FIRQ_LIST_PFAULT   8
+#define FIRQ_LIST_VIRTIO   9
+#define FIRQ_LIST_COUNT   10
+#define FIRQ_CNTR_IO       0
+#define FIRQ_CNTR_SERVICE  1
+#define FIRQ_CNTR_VIRTIO   2
+#define FIRQ_CNTR_PFAULT   3
+#define FIRQ_MAX_COUNT     4
+
 struct kvm_s390_float_interrupt {
+	unsigned long pending_irqs;
 	spinlock_t lock;
-	struct list_head list;
-	atomic_t active;
+	struct list_head lists[FIRQ_LIST_COUNT];
+	int counters[FIRQ_MAX_COUNT];
+	struct kvm_s390_mchk_info mchk;
+	struct kvm_s390_ext_info srv_signal;
 	int next_rr_cpu;
 	unsigned long idle_mask[BITS_TO_LONGS(KVM_MAX_VCPUS)];
-	unsigned int irq_count;
 };
 
 struct kvm_hw_wp_info_arch {
@@ -462,9 +539,8 @@ struct kvm_guestdbg_info_arch {
 
 struct kvm_vcpu_arch {
 	struct kvm_s390_sie_block *sie_block;
-	s390_fp_regs      host_fpregs;
 	unsigned int      host_acrs[NUM_ACRS];
-	s390_fp_regs      guest_fpregs;
+	struct fpu	  host_fpregs;
 	struct kvm_s390_local_interrupt local_int;
 	struct hrtimer    ckc_timer;
 	struct kvm_s390_pgm_info pgm;
@@ -477,6 +553,15 @@ struct kvm_vcpu_arch {
 	unsigned long pfault_token;
 	unsigned long pfault_select;
 	unsigned long pfault_compare;
+	bool cputm_enabled;
+	/*
+	 * The seqcount protects updates to cputm_start and sie_block.cputm,
+	 * this way we can have non-blocking reads with consistent values.
+	 * Only the owning VCPU thread (vcpu->cpu) is allowed to change these
+	 * values and to start/stop/enable/disable cpu timer accounting.
+	 */
+	seqcount_t cputm_seqcount;
+	__u64 cputm_start;
 };
 
 struct kvm_vm_stat {
@@ -515,15 +600,11 @@ struct s390_io_adapter {
 #define S390_ARCH_FAC_MASK_SIZE_U64 \
 	(S390_ARCH_FAC_MASK_SIZE_BYTE / sizeof(u64))
 
-struct kvm_s390_fac {
-	/* facility list requested by guest */
-	__u64 list[S390_ARCH_FAC_LIST_SIZE_U64];
-	/* facility mask supported by kvm & hosting machine */
-	__u64 mask[S390_ARCH_FAC_LIST_SIZE_U64];
-};
-
 struct kvm_s390_cpu_model {
-	struct kvm_s390_fac *fac;
+	/* facility mask supported by kvm & hosting machine */
+	__u64 fac_mask[S390_ARCH_FAC_LIST_SIZE_U64];
+	/* facility list requested by guest (in dma page) */
+	__u64 *fac_list;
 	struct cpuid cpu_id;
 	unsigned short ibc;
 };
@@ -542,22 +623,37 @@ struct kvm_s390_crypto_cb {
 	__u8    reserved80[128];                /* 0x0080 */
 };
 
+/*
+ * sie_page2 has to be allocated as DMA because fac_list and crycb need
+ * 31bit addresses in the sie control block.
+ */
+struct sie_page2 {
+	__u64 fac_list[S390_ARCH_FAC_LIST_SIZE_U64];	/* 0x0000 */
+	struct kvm_s390_crypto_cb crycb;		/* 0x0800 */
+	u8 reserved900[0x1000 - 0x900];			/* 0x0900 */
+} __packed;
+
 struct kvm_arch{
-	struct sca_block *sca;
+	void *sca;
+	int use_esca;
+	rwlock_t sca_lock;
 	debug_info_t *dbf;
 	struct kvm_s390_float_interrupt float_int;
 	struct kvm_device *flic;
 	struct gmap *gmap;
+	unsigned long mem_limit;
 	int css_support;
 	int use_irqchip;
 	int use_cmma;
 	int user_cpu_state_ctrl;
 	int user_sigp;
+	int user_stsi;
 	struct s390_io_adapter *adapters[MAX_S390_IO_ADAPTERS];
 	wait_queue_head_t ipte_wq;
 	int ipte_lock_count;
 	struct mutex ipte_mutex;
 	spinlock_t start_stop_lock;
+	struct sie_page2 *sie_page2;
 	struct kvm_s390_cpu_model model;
 	struct kvm_s390_crypto crypto;
 	u64 epoch;
@@ -592,15 +688,16 @@ extern char sie_exit;
 
 static inline void kvm_arch_hardware_disable(void) {}
 static inline void kvm_arch_check_processor_compat(void *rtn) {}
-static inline void kvm_arch_exit(void) {}
 static inline void kvm_arch_sync_events(struct kvm *kvm) {}
 static inline void kvm_arch_vcpu_uninit(struct kvm_vcpu *vcpu) {}
 static inline void kvm_arch_sched_in(struct kvm_vcpu *vcpu, int cpu) {}
 static inline void kvm_arch_free_memslot(struct kvm *kvm,
 		struct kvm_memory_slot *free, struct kvm_memory_slot *dont) {}
-static inline void kvm_arch_memslots_updated(struct kvm *kvm) {}
+static inline void kvm_arch_memslots_updated(struct kvm *kvm, struct kvm_memslots *slots) {}
 static inline void kvm_arch_flush_shadow_all(struct kvm *kvm) {}
 static inline void kvm_arch_flush_shadow_memslot(struct kvm *kvm,
 		struct kvm_memory_slot *slot) {}
+static inline void kvm_arch_vcpu_blocking(struct kvm_vcpu *vcpu) {}
+static inline void kvm_arch_vcpu_unblocking(struct kvm_vcpu *vcpu) {}
 
 #endif

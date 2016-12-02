@@ -328,7 +328,7 @@
 
 #define XAE_MDIO_DIV_DFT		29 /* Default MDIO clock divisor */
 
- /* Total number of entries in the hardware multicast table. */
+/* Total number of entries in the hardware multicast table. */
 #define XAE_MULTICAST_CAM_TABLE_NUM	4
 
 /* Axi Ethernet Synthesis features */
@@ -383,6 +383,7 @@
  *		  Otherwise reserved.
  * @ptp_tx_ts_tag: Tag value of 2 step timestamping if timestamping is enabled
  *		   Otherwise reserved.
+ * @tx_skb:	  Transmit skb address
  */
 struct axidma_bd {
 	u32 next;	/* Physical address of next buffer descriptor */
@@ -398,10 +399,15 @@ struct axidma_bd {
 	u32 app2;	/* TX csum seed */
 	u32 app3;
 	u32 app4;
-	u32 sw_id_offset;
-	u32 ptp_tx_skb;
+	phys_addr_t sw_id_offset; /* first unused field by h/w */
+	phys_addr_t ptp_tx_skb;
 	u32 ptp_tx_ts_tag;
-};
+	phys_addr_t tx_skb;
+	u32 tx_desc_mapping;
+} __aligned(128);
+
+#define DESC_DMA_MAP_SINGLE 0
+#define DESC_DMA_MAP_PAGE 1
 
 /**
  * struct axienet_local - axienet private per device data
@@ -410,7 +416,6 @@ struct axidma_bd {
  * @phy_dev:	Pointer to PHY device structure attached to the axienet_local
  * @phy_node:	Pointer to device node structure
  * @mii_bus:	Pointer to MII bus structure
- * @mdio_irqs:	IRQs table for MDIO bus required in mii_bus structure
  * @regs:	Base address for the axienet_local device address space
  * @dma_regs:	Base address for the axidma device address space
  * @dma_err_tasklet: Tasklet structure to process Axi DMA errors
@@ -437,8 +442,11 @@ struct axidma_bd {
  *		  Txed/Rxed in the existing hardware. If jumbo option is
  *		  supported, the maximum frame size would be 9k. Else it is
  *		  1522 bytes (assuming support for basic VLAN)
- * @jumbo_support: Stores hardware configuration for jumbo support. If hardware
- *		   can handle jumbo packets, this entry will be 1, else 0.
+ * @rxmem:	Stores rx memory size for jumbo frame handling.
+ * @csum_offload_on_tx_path:	Stores the checksum selection on TX side.
+ * @csum_offload_on_rx_path:	Stores the checksum selection on RX side.
+ * @coalesce_count_rx:	Store the irq coalesce on RX side.
+ * @coalesce_count_tx:	Store the irq coalesce on TX side.
  * @is_10Gmac:	  Check for 10g mac.
  * @phy_interface: Phy interface type.
  * @phy_flags:	Phy interface flags.
@@ -456,7 +464,6 @@ struct axienet_local {
 
 	/* MDIO bus data */
 	struct mii_bus *mii_bus;	/* MII bus reference */
-	int mdio_irqs[PHY_MAX_ADDR];	/* IRQs table for MDIO bus */
 
 	/* IO registers, dma functions and IRQs */
 	void __iomem *regs;

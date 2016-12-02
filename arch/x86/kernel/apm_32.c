@@ -919,7 +919,7 @@ recalc:
 	} else if (jiffies_since_last_check > idle_period) {
 		unsigned int idle_percentage;
 
-		idle_percentage = stime - last_stime;
+		idle_percentage = cputime_to_jiffies(stime - last_stime);
 		idle_percentage *= 100;
 		idle_percentage /= jiffies_since_last_check;
 		use_apm_idle = (idle_percentage > idle_threshold);
@@ -1088,7 +1088,7 @@ static int apm_get_battery_status(u_short which, u_short *status,
  *	@device: identity of device
  *	@enable: on/off
  *
- *	Activate or deactive power management on either a specific device
+ *	Activate or deactivate power management on either a specific device
  *	or the entire system (%APM_DEVICE_ALL).
  */
 

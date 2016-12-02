@@ -65,6 +65,10 @@ enum pm_api_id {
 	RESET_GET_STATUS,
 	MMIO_WRITE,
 	MMIO_READ,
+	PM_INIT,
+	FPGA_LOAD,
+	FPGA_GET_STATUS,
+	GET_CHIPID,
 };
 
 /* PMU-FW return status codes */
@@ -102,11 +106,17 @@ static int zynqmp_pm_ret_code(u32 ret_status)
 	}
 }
 
+static noinline int do_fw_call_fail(u64 arg0, u64 arg1, u64 arg2,
+				    u32 *ret_payload)
+{
+	return -ENODEV;
+}
+
 /*
  * PM function call wrapper
  * Invoke do_fw_call_smc or do_fw_call_hvc, depending on the configuration
  */
-static int (*do_fw_call)(u64, u64, u64, u32 *ret_payload);
+static int (*do_fw_call)(u64, u64, u64, u32 *ret_payload) = do_fw_call_fail;
 
 /**
  * do_fw_call_smc - Call system-level power management layer (SMC)
@@ -234,6 +244,7 @@ static int invoke_pm_fn(u32 pm_api_id, u32 arg0, u32 arg1, u32 arg2, u32 arg3,
 
 /* PM-APIs for suspending of APU */
 
+#ifdef CONFIG_ZYNQMP_PM_API_DEBUGFS
 /**
  * zynqmp_pm_self_suspend - PM call for master to suspend itself
  * @node:	Node ID of the master or subsystem
@@ -248,6 +259,35 @@ static int zynqmp_pm_self_suspend(const u32 node,
 {
 	return invoke_pm_fn(SELF_SUSPEND, node, latency, state, 0, NULL);
 }
+
+/**
+ * zynqmp_pm_abort_suspend - PM call to announce that a prior suspend request
+ *				is to be aborted.
+ * @reason:	Reason for the abort
+ *
+ * Return:	Returns status, either success or error+reason
+ */
+static int zynqmp_pm_abort_suspend(const enum zynqmp_pm_abort_reason reason)
+{
+	return invoke_pm_fn(ABORT_SUSPEND, reason, 0, 0, 0, NULL);
+}
+
+/**
+ * zynqmp_pm_register_notifier - Register the PU to be notified of PM events
+ * @node:	Node ID of the slave
+ * @event:	The event to be notified about
+ * @wake:	Wake up on event
+ * @enable:	Enable or disable the notifier
+ *
+ * Return:	Returns status, either success or error+reason
+ */
+static int zynqmp_pm_register_notifier(const u32 node, const u32 event,
+				       const u32 wake, const u32 enable)
+{
+	return invoke_pm_fn(REGISTER_NOTIFIER, node, event,
+						wake, enable, NULL);
+}
+#endif
 
 /**
  * zynqmp_pm_request_suspend - PM call to request for another PU or subsystem to
@@ -283,18 +323,6 @@ int zynqmp_pm_force_powerdown(const u32 target,
 	return invoke_pm_fn(FORCE_POWERDOWN, target, ack, 0, 0, NULL);
 }
 EXPORT_SYMBOL_GPL(zynqmp_pm_force_powerdown);
-
-/**
- * zynqmp_pm_abort_suspend - PM call to announce that a prior suspend request
- *				is to be aborted.
- * @reason:	Reason for the abort
- *
- * Return:	Returns status, either success or error+reason
- */
-static int zynqmp_pm_abort_suspend(const enum zynqmp_pm_abort_reason reason)
-{
-	return invoke_pm_fn(ABORT_SUSPEND, reason, 0, 0, 0, NULL);
-}
 
 /**
  * zynqmp_pm_request_wakeup - PM call for to wake up selected master or subsystem
@@ -334,9 +362,9 @@ EXPORT_SYMBOL_GPL(zynqmp_pm_set_wakeup_source);
  *
  * Return:	Returns status, either success or error+reason
  */
-int zynqmp_pm_system_shutdown(const u32 restart)
+int zynqmp_pm_system_shutdown(const u32 type, const u32 subtype)
 {
-	return invoke_pm_fn(SYSTEM_SHUTDOWN, restart, 0, 0, 0, NULL);
+	return invoke_pm_fn(SYSTEM_SHUTDOWN, type, subtype, 0, 0, NULL);
 }
 EXPORT_SYMBOL_GPL(zynqmp_pm_system_shutdown);
 
@@ -364,13 +392,12 @@ EXPORT_SYMBOL_GPL(zynqmp_pm_request_node);
 /**
  * zynqmp_pm_release_node - PM call to release a node
  * @node:	Node ID of the slave
- * @latency:	Requested maximum wakeup latency
  *
  * Return:	Returns status, either success or error+reason
  */
-int zynqmp_pm_release_node(const u32 node, const u32 latency)
+int zynqmp_pm_release_node(const u32 node)
 {
-	return invoke_pm_fn(RELEASE_NODE, node, latency, 0, 0, NULL);
+	return invoke_pm_fn(RELEASE_NODE, node, 0, 0, 0, NULL);
 }
 EXPORT_SYMBOL_GPL(zynqmp_pm_release_node);
 
@@ -438,6 +465,29 @@ int zynqmp_pm_get_api_version(u32 *version)
 EXPORT_SYMBOL_GPL(zynqmp_pm_get_api_version);
 
 /**
+ * zynqmp_pm_get_chipid - Get silicon ID registers
+ * @idcode:	IDCODE register
+ * @version:	version register
+ *
+ * Return:	Returns the status of the operation and the idcode and version
+ *		registers in @idcode and @version.
+ */
+int zynqmp_pm_get_chipid(u32 *idcode, u32 *version)
+{
+	u32 ret_payload[PAYLOAD_ARG_CNT];
+
+	if (!idcode || !version)
+		return -EINVAL;
+
+	invoke_pm_fn(GET_CHIPID, 0, 0, 0, 0, ret_payload);
+	*idcode = ret_payload[1];
+	*version = ret_payload[2];
+
+	return zynqmp_pm_ret_code((enum pm_ret_status)ret_payload[0]);
+}
+EXPORT_SYMBOL_GPL(zynqmp_pm_get_chipid);
+
+/**
  * zynqmp_pm_set_configuration - PM call to set system configuration
  * @physical_addr:	Physical 32-bit address of data structure in memory
  *
@@ -477,22 +527,6 @@ int zynqmp_pm_get_operating_characteristic(const u32 node,
 }
 EXPORT_SYMBOL_GPL(zynqmp_pm_get_operating_characteristic);
 
-/**
- * zynqmp_pm_register_notifier - Register the PU to be notified of PM events
- * @node:	Node ID of the slave
- * @event:	The event to be notified about
- * @wake:	Wake up on event
- * @enable:	Enable or disable the notifier
- *
- * Return:	Returns status, either success or error+reason
- */
-static int zynqmp_pm_register_notifier(const u32 node, const u32 event,
-				       const u32 wake, const u32 enable)
-{
-	return invoke_pm_fn(REGISTER_NOTIFIER, node, event,
-						wake, enable, NULL);
-}
-
 /* Direct-Control API functions */
 
 /**
@@ -503,7 +537,8 @@ static int zynqmp_pm_register_notifier(const u32 node, const u32 event,
  *
  * Return:		Returns status, either success or error+reason
  */
-int zynqmp_pm_reset_assert(const u32 reset, const u32 assert_flag)
+int zynqmp_pm_reset_assert(const enum zynqmp_pm_reset reset,
+			   const enum zynqmp_pm_reset_action assert_flag)
 {
 	return invoke_pm_fn(RESET_ASSERT, reset, assert_flag, 0, 0, NULL);
 }
@@ -516,7 +551,7 @@ EXPORT_SYMBOL_GPL(zynqmp_pm_reset_assert);
  *
  * Return:	Returns status, either success or error+reason
  */
-int zynqmp_pm_reset_get_status(const u32 reset, u32 *status)
+int zynqmp_pm_reset_get_status(const enum zynqmp_pm_reset reset, u32 *status)
 {
 	u32 ret_payload[PAYLOAD_ARG_CNT];
 
@@ -572,6 +607,58 @@ int zynqmp_pm_mmio_read(const u32 address, u32 *value)
 	return zynqmp_pm_ret_code((enum pm_ret_status)ret_payload[0]);
 }
 EXPORT_SYMBOL_GPL(zynqmp_pm_mmio_read);
+
+/**
+ * zynqmp_pm_fpga_load - Perform the fpga load
+ * @address:    Address to write to
+ * @size        pl bitstream size
+ * @flags:
+ *	BIT(0) - Bit-stream type.
+ *		 0 - Full Bit-stream.
+ *		 1 - Partial Bit-stream.
+ *	BIT(1) - Authentication.
+ *		 1 - Enable.
+ *		 0 - Disable.
+ *	BIT(2) - Encryption.
+ *		 1 - Enable.
+ *		 0 - Disable.
+ * NOTE -
+ *	The current implementation supports only Full Bit-stream.
+ *
+ * This function provides access to xilfpga library to transfer
+ * the required bitstream into PL.
+ *
+ * Return:      Returns status, either success or error+reason
+ */
+int zynqmp_pm_fpga_load(const u64 address, const u32 size, const u32 flags)
+{
+	return invoke_pm_fn(FPGA_LOAD, (u32)address,
+			((u32)(address >> 32)), size, flags, NULL);
+}
+EXPORT_SYMBOL_GPL(zynqmp_pm_fpga_load);
+
+/**
+ * zynqmp_pm_fpga_get_status - Read value from PCAP status register
+ * @value:      Value to read
+ *
+ *This function provides access to the xilfpga library to get
+ *the PCAP status
+ *
+ * Return:      Returns status, either success or error+reason
+ */
+int zynqmp_pm_fpga_get_status(u32 *value)
+{
+	u32 ret_payload[PAYLOAD_ARG_CNT];
+
+	if (!value)
+		return -EINVAL;
+
+	invoke_pm_fn(FPGA_GET_STATUS, 0, 0, 0, 0, ret_payload);
+	*value = ret_payload[1];
+
+	return zynqmp_pm_ret_code((enum pm_ret_status)ret_payload[0]);
+}
+EXPORT_SYMBOL_GPL(zynqmp_pm_fpga_get_status);
 
 #ifdef CONFIG_ZYNQMP_PM_API_DEBUGFS
 /**
@@ -682,6 +769,8 @@ static ssize_t zynqmp_pm_debugfs_api_write(struct file *file,
 		pm_id = MMIO_READ;
 	else if (strncasecmp(pm_api_req, "MMIO_WRITE", 10) == 0)
 		pm_id = MMIO_WRITE;
+	else if (strncasecmp(pm_api_req, "GET_CHIPID", 9) == 0)
+		pm_id = GET_CHIPID;
 	/* If no name was entered look for PM-API ID instead */
 	else if (kstrtouint(pm_api_req, 10, &pm_id))
 		ret = -EINVAL;
@@ -731,7 +820,7 @@ static ssize_t zynqmp_pm_debugfs_api_write(struct file *file,
 					pm_api_arg[1], pm_api_arg[2]);
 		break;
 	case SYSTEM_SHUTDOWN:
-		ret = zynqmp_pm_system_shutdown(pm_api_arg[0]);
+		ret = zynqmp_pm_system_shutdown(pm_api_arg[0], pm_api_arg[1]);
 		break;
 	case REQUEST_NODE:
 		ret = zynqmp_pm_request_node(pm_api_arg[0],
@@ -739,12 +828,10 @@ static ssize_t zynqmp_pm_debugfs_api_write(struct file *file,
 					ZYNQMP_PM_CAPABILITY_ACCESS,
 			pm_api_arg[2] ? pm_api_arg[2] : 0,
 			pm_api_arg[3] ? pm_api_arg[3] :
-				ZYNQMP_PM_REQUEST_ACK_CALLBACK_STANDARD);
+				ZYNQMP_PM_REQUEST_ACK_NON_BLOCKING);
 		break;
 	case RELEASE_NODE:
-		ret = zynqmp_pm_release_node(pm_api_arg[0],
-				pm_api_arg[1] ? pm_api_arg[1] :
-						ZYNQMP_PM_MAX_LATENCY);
+		ret = zynqmp_pm_release_node(pm_api_arg[0]);
 		break;
 	case SET_REQUIREMENT:
 		ret = zynqmp_pm_set_requirement(pm_api_arg[0],
@@ -752,7 +839,7 @@ static ssize_t zynqmp_pm_debugfs_api_write(struct file *file,
 					ZYNQMP_PM_CAPABILITY_CONTEXT,
 			pm_api_arg[2] ? pm_api_arg[2] : 0,
 			pm_api_arg[3] ? pm_api_arg[3] :
-				ZYNQMP_PM_REQUEST_ACK_CALLBACK_STANDARD);
+				ZYNQMP_PM_REQUEST_ACK_NON_BLOCKING);
 		break;
 	case SET_MAX_LATENCY:
 		ret = zynqmp_pm_set_max_latency(pm_api_arg[0],
@@ -790,6 +877,11 @@ static ssize_t zynqmp_pm_debugfs_api_write(struct file *file,
 	case MMIO_WRITE:
 		ret = zynqmp_pm_mmio_write(pm_api_arg[0],
 				     pm_api_arg[1], pm_api_arg[2]);
+		break;
+	case GET_CHIPID:
+		ret = zynqmp_pm_get_chipid(&pm_api_arg[0], &pm_api_arg[1]);
+		pr_info("%s idcode: %#x, version:%#x\n",
+			__func__, pm_api_arg[0], pm_api_arg[1]);
 		break;
 	default:
 		pr_err("%s Unsupported PM-API request\n", __func__);
@@ -863,14 +955,14 @@ static const struct file_operations fops_zynqmp_pm_dbgfs = {
  * Return:      Returns 0 on success
  *		Corresponding error code otherwise
  */
-static int zynqmp_pm_api_debugfs_init(void)
+static int zynqmp_pm_api_debugfs_init(struct device *dev)
 {
 	int err;
 
 	/* Initialize debugfs interface */
 	zynqmp_pm_debugfs_dir = debugfs_create_dir(DRIVER_NAME, NULL);
 	if (!zynqmp_pm_debugfs_dir) {
-		pr_err("%s debugfs_create_dir failed\n", __func__);
+		dev_err(dev, "debugfs_create_dir failed\n");
 		return -ENODEV;
 	}
 
@@ -879,7 +971,7 @@ static int zynqmp_pm_api_debugfs_init(void)
 					zynqmp_pm_debugfs_dir, NULL,
 					&fops_zynqmp_pm_dbgfs);
 	if (!zynqmp_pm_debugfs_power) {
-		pr_err("%s debugfs_create_file power failed\n", __func__);
+		dev_err(dev, "debugfs_create_file power failed\n");
 		err = -ENODEV;
 		goto err_dbgfs;
 	}
@@ -889,8 +981,7 @@ static int zynqmp_pm_api_debugfs_init(void)
 					zynqmp_pm_debugfs_dir, NULL,
 					&fops_zynqmp_pm_dbgfs);
 	if (!zynqmp_pm_debugfs_api_version) {
-		pr_err("%s debugfs_create_file api_version failed\n",
-								__func__);
+		dev_err(dev, "debugfs_create_file api_version failed\n");
 		err = -ENODEV;
 		goto err_dbgfs;
 	}
@@ -902,28 +993,12 @@ static int zynqmp_pm_api_debugfs_init(void)
 	return err;
 }
 
-/**
- * zynqmp_pm_api_debugfs_remove - Remove debugfs functionality
- *
- * Return:	Returns 0
- */
-static int zynqmp_pm_api_debugfs_remove(void)
-{
-	debugfs_remove_recursive(zynqmp_pm_debugfs_dir);
-	zynqmp_pm_debugfs_dir = NULL;
-	return 0;
-}
-
 #else
-static int zynqmp_pm_api_debugfs_init(void)
+static int zynqmp_pm_api_debugfs_init(struct device *dev)
 {
 	return 0;
 }
 
-static int zynqmp_pm_api_debugfs_remove(void)
-{
-	return 0;
-}
 #endif /* CONFIG_ZYNQMP_PM_API_DEBUGFS */
 
 static const struct of_device_id pm_of_match[] = {
@@ -976,9 +1051,39 @@ static void get_set_conduit_method(struct device_node *np)
  */
 static int zynqmp_pm_probe(struct platform_device *pdev)
 {
-	struct device_node *np;
 
-	np = pdev->dev.of_node;
+	/* Check PM API version number */
+	if (pm_api_version != ZYNQMP_PM_VERSION)
+		return -ENODEV;
+
+	dev_info(&pdev->dev, "Power management API v%d.%d\n",
+		ZYNQMP_PM_VERSION_MAJOR, ZYNQMP_PM_VERSION_MINOR);
+
+	zynqmp_pm_api_debugfs_init(&pdev->dev);
+
+	return 0;
+}
+
+static struct platform_driver zynqmp_pm_platform_driver = {
+	.probe   = zynqmp_pm_probe,
+	.driver  = {
+			.name             = DRIVER_NAME,
+			.of_match_table   = pm_of_match,
+		   },
+};
+builtin_platform_driver(zynqmp_pm_platform_driver);
+
+static int __init zynqmp_plat_init(void)
+{
+	struct device_node *np;
+	int ret = 0;
+
+	np = of_find_compatible_node(NULL, NULL, "xlnx,zynqmp-pm");
+	if (!np) {
+		pr_err("%s: pm node not found\n", __func__);
+		ret = -ENXIO;
+		goto np_err;
+	}
 
 	get_set_conduit_method(np);
 
@@ -989,41 +1094,16 @@ static int zynqmp_pm_probe(struct platform_device *pdev)
 		       __func__,
 		       ZYNQMP_PM_VERSION_MAJOR, ZYNQMP_PM_VERSION_MINOR,
 		       pm_api_version >> 16, pm_api_version & 0xffff);
-		return -EIO;
+
+		do_fw_call = do_fw_call_fail;
 	}
 
 	pr_info("%s Power management API v%d.%d\n", __func__,
 		ZYNQMP_PM_VERSION_MAJOR, ZYNQMP_PM_VERSION_MINOR);
 
-	zynqmp_pm_api_debugfs_init();
-
-	return 0;
+np_err:
+	of_node_put(np);
+	return ret;
 }
 
-/**
- * zynqmp_pm_remove - Remove debugfs interface
- *
- * @pdev:	Pointer to the platform_device structure
- *
- * Return:	Returns 0
- */
-static int zynqmp_pm_remove(struct platform_device *pdev)
-{
-	zynqmp_pm_api_debugfs_remove();
-
-	return 0;
-}
-
-static struct platform_driver zynqmp_pm_platform_driver = {
-	.probe   = zynqmp_pm_probe,
-	.remove  = zynqmp_pm_remove,
-	.driver  = {
-			.name             = DRIVER_NAME,
-			.of_match_table   = pm_of_match,
-		   },
-};
-
-module_platform_driver(zynqmp_pm_platform_driver);
-
-MODULE_DESCRIPTION("Xilinx Zynq MPSoC Power Management API platform driver.");
-MODULE_LICENSE("GPL");
+early_initcall(zynqmp_plat_init);
