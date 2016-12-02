@@ -6,6 +6,7 @@ dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-zcu100.dtb
 dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-zcu102.dtb
 dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-zcu102-revB.dtb
 dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-zcu106.dtb
+dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-enclustra-xu1.dtb
 
 always		:= $(dtb-y)
 subdir-y	:= $(dts-dirs)
