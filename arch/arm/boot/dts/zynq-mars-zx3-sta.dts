@@ -20,7 +20,7 @@
 	model = "Enclustra Mars ZX3 SOM";
 };
 
-&uart1 {
+&uart0 {
 	status = "okay";
 };
 
