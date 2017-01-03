@@ -27,6 +27,7 @@
 		i2c0 = &i2c0;
 		i2c1 = &i2c1;
 		mmc0 = &sdhci1;
+		mmc1 = &sdhci0;
 		rtc0 = &rtc;
 		serial0 = &uart0;
 		serial1 = &uart1;
@@ -136,7 +137,7 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 		reg = <0x0>;
-		spi-tx-bus-width = <1>;
+		spi-tx-bus-width = <4>;
 		spi-rx-bus-width = <4>; /* FIXME also DUAL configuration possible */
 		spi-max-frequency = <108000000>; /* Based on DC1 spec */
 		partition@qspi-fsbl-uboot { /* for testing purpose */
@@ -183,6 +184,14 @@
 	no-1-8-v;	/* for 1.0 silicon */
 	wp-inverted;
 	xlnx,mio_bank = <1>;
+};
+
+&sdhci0 {
+	status = "okay";
+	no-1-8-v;	/* for 1.0 silicon */
+	non-removable;
+	disable-wp;
+	xlnx,mio_bank = <0>;
 };
 
 &serdes {
