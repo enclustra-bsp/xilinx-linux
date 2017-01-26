@@ -225,45 +225,6 @@ static void macb_get_hwaddr(struct macb *bp)
 	eth_hw_addr_random(bp->dev);
 }
 
-static int macb_mdio_read(struct mii_bus *bus, int mii_id, int regnum)
-{
-	struct macb *bp = bus->priv;
-	int value;
-
-	macb_writel(bp, MAN, (MACB_BF(SOF, MACB_MAN_SOF)
-			      | MACB_BF(RW, MACB_MAN_READ)
-			      | MACB_BF(PHYA, mii_id)
-			      | MACB_BF(REGA, regnum)
-			      | MACB_BF(CODE, MACB_MAN_CODE)));
-
-	/* wait for end of transfer */
-	while (!MACB_BFEXT(IDLE, macb_readl(bp, NSR)))
-		cpu_relax();
-
-	value = MACB_BFEXT(DATA, macb_readl(bp, MAN));
-
-	return value;
-}
-
-static int macb_mdio_write(struct mii_bus *bus, int mii_id, int regnum,
-			   u16 value)
-{
-	struct macb *bp = bus->priv;
-
-	macb_writel(bp, MAN, (MACB_BF(SOF, MACB_MAN_SOF)
-			      | MACB_BF(RW, MACB_MAN_WRITE)
-			      | MACB_BF(PHYA, mii_id)
-			      | MACB_BF(REGA, regnum)
-			      | MACB_BF(CODE, MACB_MAN_CODE)
-			      | MACB_BF(DATA, value)));
-
-	/* wait for end of transfer */
-	while (!MACB_BFEXT(IDLE, macb_readl(bp, NSR)))
-		cpu_relax();
-
-	return 0;
-}
-
 /**
  * macb_set_tx_clk() - Set a clock to a new frequency
  * @clk		Pointer to the clock to change
@@ -378,10 +339,7 @@ static void macb_handle_link_change(struct net_device *dev)
 static int macb_mii_probe(struct net_device *dev)
 {
 	struct macb *bp = netdev_priv(dev);
-	struct macb_platform_data *pdata;
 	struct phy_device *phydev;
-	int phy_irq;
-	int ret;
 
 	if (bp->phy_node) {
 		phydev = of_phy_connect(dev, bp->phy_node,
@@ -389,32 +347,7 @@ static int macb_mii_probe(struct net_device *dev)
 					bp->phy_interface);
 		if (!phydev)
 			return -ENODEV;
-	} else {
-		phydev = phy_find_first(bp->mii_bus);
-		if (!phydev) {
-			netdev_err(dev, "no PHY found\n");
-			return -ENXIO;
-		}
-
-		pdata = dev_get_platdata(&bp->pdev->dev);
-		if (pdata && gpio_is_valid(pdata->phy_irq_pin)) {
-			ret = devm_gpio_request(&bp->pdev->dev,
-						pdata->phy_irq_pin, "phy int");
-			if (!ret) {
-				phy_irq = gpio_to_irq(pdata->phy_irq_pin);
-				phydev->irq = (phy_irq < 0) ?
-					      PHY_POLL : phy_irq;
-			}
-		}
-
-		/* attach the mac to the phy */
-		ret = phy_connect_direct(dev, phydev, &macb_handle_link_change,
-					 bp->phy_interface);
-		if (ret) {
-			netdev_err(dev, "Could not attach to PHY\n");
-			return ret;
-		}
-	}
+	} else return -ENXIO;
 
 	/* mask with MAC supported features */
 	if (macb_is_gem(bp) && bp->caps & MACB_CAPS_GIGABIT_MODE_AVAILABLE)
@@ -433,83 +366,6 @@ static int macb_mii_probe(struct net_device *dev)
 	bp->phy_dev = phydev;
 
 	return 0;
-}
-
-static int macb_mii_init(struct macb *bp)
-{
-	struct macb_platform_data *pdata;
-	struct device_node *np, *mdio_np;
-	int err = -ENXIO, i;
-
-	/* Enable management port */
-	macb_writel(bp, NCR, MACB_BIT(MPE));
-
-	bp->mii_bus = mdiobus_alloc();
-	if (bp->mii_bus == NULL) {
-		err = -ENOMEM;
-		goto err_out;
-	}
-
-	bp->mii_bus->name = "MACB_mii_bus";
-	bp->mii_bus->read = &macb_mdio_read;
-	bp->mii_bus->write = &macb_mdio_write;
-	snprintf(bp->mii_bus->id, MII_BUS_ID_SIZE, "%s-%x",
-		bp->pdev->name, bp->pdev->id);
-	bp->mii_bus->priv = bp;
-	bp->mii_bus->parent = &bp->dev->dev;
-	pdata = dev_get_platdata(&bp->pdev->dev);
-
-	dev_set_drvdata(&bp->dev->dev, bp->mii_bus);
-
-	np = bp->pdev->dev.of_node;
-	mdio_np = of_get_child_by_name(np, "mdio");
-	if (mdio_np) {
-		of_node_put(mdio_np);
-		err = of_mdiobus_register(bp->mii_bus, mdio_np);
-		if (err)
-			goto err_out_unregister_bus;
-	} else if (np) {
-		/* try dt phy registration */
-		err = of_mdiobus_register(bp->mii_bus, np);
-
-		/* fallback to standard phy registration if no phy were
-		   found during dt phy registration */
-		if (!err && !phy_find_first(bp->mii_bus)) {
-			for (i = 0; i < PHY_MAX_ADDR; i++) {
-				struct phy_device *phydev;
-
-				phydev = mdiobus_scan(bp->mii_bus, i);
-				if (IS_ERR(phydev)) {
-					err = PTR_ERR(phydev);
-					break;
-				}
-			}
-
-			if (err)
-				goto err_out_unregister_bus;
-		}
-	} else {
-		if (pdata)
-			bp->mii_bus->phy_mask = pdata->phy_mask;
-
-		err = mdiobus_register(bp->mii_bus);
-	}
-
-	if (err)
-		goto err_out_free_mdiobus;
-
-	err = macb_mii_probe(bp->dev);
-	if (err)
-		goto err_out_unregister_bus;
-
-	return 0;
-
-err_out_unregister_bus:
-	mdiobus_unregister(bp->mii_bus);
-err_out_free_mdiobus:
-	mdiobus_free(bp->mii_bus);
-err_out:
-	return err;
 }
 
 static void macb_update_stats(struct macb *bp)
@@ -1753,16 +1609,19 @@ static void macb_init_rings(struct macb *bp)
 static void macb_reset_hw(struct macb *bp)
 {
 	struct macb_queue *queue;
-	unsigned int q;
+	unsigned int q, ctrl;
 
 	/*
 	 * Disable RX and TX (XXX: Should we halt the transmission
 	 * more gracefully?)
 	 */
-	macb_writel(bp, NCR, 0);
+	ctrl = macb_readl(bp, NCR);
+	ctrl &= ~(MACB_BIT(RE) | MACB_BIT(TE));
+	macb_writel(bp, NCR, ctrl);
 
 	/* Clear the stats registers (XXX: Update stats first?) */
-	macb_writel(bp, NCR, MACB_BIT(CLRSTAT));
+	ctrl |= MACB_BIT(CLRSTAT);
+	macb_writel(bp, NCR, ctrl);
 
 	/* Clear all status flags */
 	macb_writel(bp, TSR, -1);
@@ -2296,7 +2155,8 @@ static int macb_open(struct net_device *dev)
 	netif_carrier_off(dev);
 
 	/* if the phy is not yet register, retry later*/
-	if (!bp->phy_dev)
+	err = macb_mii_probe(dev);
+	if (err)
 		return -EAGAIN;
 
 	/* RX buffers initialization */
@@ -3381,16 +3241,16 @@ static int macb_probe(struct platform_device *pdev)
 	unsigned int queue_mask, num_queues;
 	struct macb_platform_data *pdata;
 	bool native_io;
-	struct phy_device *phydev;
 	struct net_device *dev;
 	struct resource *regs;
 	void __iomem *mem;
 	const char *mac;
 	struct macb *bp;
+	int phy_irq;
 	int err;
 
 	regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	mem = devm_ioremap_resource(&pdev->dev, regs);
+	mem = devm_ioremap(&pdev->dev, regs->start, resource_size(regs));
 	if (IS_ERR(mem))
 		return PTR_ERR(mem);
 
@@ -3471,8 +3331,8 @@ static int macb_probe(struct platform_device *pdev)
 		macb_get_hwaddr(bp);
 
 	/* Power up the PHY if there is a GPIO reset */
-	phy_node = of_parse_phandle(np, "phy-handle", 0);
-	if (!phy_node && of_phy_is_fixed_link(np)) {
+	bp->phy_node = of_parse_phandle(np, "phy-handle", 0);
+	if (!bp->phy_node && of_phy_is_fixed_link(np)) {
 		err = of_phy_register_fixed_link(np);
 		if (err < 0) {
 			dev_err(&pdev->dev, "broken fixed-link specification");
@@ -3481,7 +3341,7 @@ static int macb_probe(struct platform_device *pdev)
 		phy_node = of_node_get(np);
 		bp->phy_node = phy_node;
 	} else {
-		int gpio = of_get_named_gpio(phy_node, "reset-gpios", 0);
+		int gpio = of_get_named_gpio(bp->phy_node, "reset-gpios", 0);
 		if (gpio_is_valid(gpio))
 			bp->reset_gpio = gpio_to_desc(gpio);
 		gpiod_set_value(bp->reset_gpio, GPIOD_OUT_HIGH);
@@ -3511,9 +3371,15 @@ static int macb_probe(struct platform_device *pdev)
 		goto err_out_unregister_netdev;
 	}
 
-	err = macb_mii_init(bp);
-	if (err)
-		goto err_out_unregister_netdev;
+	pdata = dev_get_platdata(&bp->pdev->dev);
+	if (pdata && gpio_is_valid(pdata->phy_irq_pin)) {
+		err = devm_gpio_request(&bp->pdev->dev, pdata->phy_irq_pin,
+					"phy int");
+		if (!err) {
+			phy_irq = gpio_to_irq(pdata->phy_irq_pin);
+			bp->phy_irq = (phy_irq < 0) ? PHY_POLL : phy_irq;
+		}
+	}
 
 	netif_carrier_off(dev);
 
@@ -3523,9 +3389,6 @@ static int macb_probe(struct platform_device *pdev)
 	netdev_info(dev, "Cadence %s rev 0x%08x at 0x%08lx irq %d (%pM)\n",
 		    macb_is_gem(bp) ? "GEM" : "MACB", macb_readl(bp, MID),
 		    dev->base_addr, dev->irq, dev->dev_addr);
-
-	phydev = bp->phy_dev;
-	phy_attached_info(phydev);
 
 	return 0;
 

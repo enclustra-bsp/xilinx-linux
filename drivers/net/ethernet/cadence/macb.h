@@ -935,6 +935,7 @@ struct macb {
 	int			phc_index;
 	unsigned int		ns_incr;
 	unsigned int		subns_incr;
+	int 			phy_irq;
 
 	struct tasklet_struct   hresp_err_tasklet;
 };
