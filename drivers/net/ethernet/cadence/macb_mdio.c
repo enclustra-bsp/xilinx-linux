@@ -129,8 +129,7 @@ static int macb_mdio_probe(struct platform_device *pdev)
 	bus->write = &macb_mdio_write;
 	snprintf(bus->id, MII_BUS_ID_SIZE, "%s-mii", dev_name(&pdev->dev));
 	bus->parent = &pdev->dev;
-	bus->irq = devm_kzalloc(&pdev->dev, sizeof(int) * PHY_MAX_ADDR,
-				GFP_KERNEL);
+
 	if (!bus->irq) {
 		ret = -ENOMEM;
 		goto err_out_free_mdiobus;
