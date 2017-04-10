@@ -16,6 +16,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+#include <linux/clk.h>
 #include <linux/clk/zynqmp.h>
 #include <linux/clk-provider.h>
 #include <linux/slab.h>
@@ -31,8 +32,8 @@
  */
 struct zynqmp_pll {
 	struct clk_hw	hw;
-	resource_size_t	*pll_ctrl;
-	resource_size_t	*pll_status;
+	void __iomem	*pll_ctrl;
+	void __iomem	*pll_status;
 	u8		lockbit;
 };
 #define to_zynqmp_pll(_hw)	container_of(_hw, struct zynqmp_pll, hw)
@@ -51,6 +52,9 @@ struct zynqmp_pll {
 #define PLL_FBDIV_MIN	25
 #define PLL_FBDIV_MAX	125
 
+#define PS_PLL_VCO_MIN 1500000000
+#define PS_PLL_VCO_MAX 3000000000
+
 enum pll_mode {
 	PLL_MODE_FRAC,
 	PLL_MODE_INT,
@@ -64,10 +68,37 @@ static inline enum pll_mode pll_frac_get_mode(struct clk_hw *hw)
 {
 	struct zynqmp_pll *clk = to_zynqmp_pll(hw);
 	u32 reg;
+	int ret;
 
-	reg = zynqmp_pm_mmio_readl(clk->pll_ctrl + FRAC_OFFSET);
+	ret = zynqmp_pm_mmio_read((u32)(ulong)(clk->pll_ctrl + FRAC_OFFSET),
+					&reg);
+	if (ret)
+		pr_warn_once("Read fail pll address: %x\n",
+				(u32)(ulong)(clk->pll_ctrl + FRAC_OFFSET));
+
 	reg = reg & PLLFCFG_FRAC_EN;
 	return reg ? PLL_MODE_FRAC : PLL_MODE_INT;
+}
+
+/**
+ * pll_frac_set_mode - Set the fractional mode
+ * @hw:		Handle between common and hardware-specific interfaces
+ * @on:		Flag to determine the mode
+ */
+static inline void pll_frac_set_mode(struct clk_hw *hw, bool on)
+{
+	struct zynqmp_pll *clk = to_zynqmp_pll(hw);
+	u32 reg = 0;
+	int ret;
+
+	if (on)
+		reg = PLLFCFG_FRAC_EN;
+
+	ret = zynqmp_pm_mmio_write((u32)(ulong)(clk->pll_ctrl + FRAC_OFFSET),
+					PLLFCFG_FRAC_EN, reg);
+	if (ret)
+		pr_warn_once("Write fail pll address: %x\n",
+				(u32)(ulong)(clk->pll_ctrl + FRAC_OFFSET));
 }
 
 /**
@@ -82,16 +113,23 @@ static long zynqmp_pll_round_rate(struct clk_hw *hw, unsigned long rate,
 		unsigned long *prate)
 {
 	u32 fbdiv;
-	long rate_div, frac, m, f;
+	long rate_div, f;
+
+	/* Enable the fractional mode if needed */
+	rate_div = ((rate * FRAC_DIV) / *prate);
+	f = rate_div % FRAC_DIV;
+	pll_frac_set_mode(hw, !!f);
 
 	if (pll_frac_get_mode(hw) == PLL_MODE_FRAC) {
-		rate_div = ((rate*100) / *prate);
-		m = rate_div / 100;
-		f = rate_div % 100;
-		m = clamp_t(u32, m, (PLL_FBDIV_MIN), (PLL_FBDIV_MAX));
-		rate = *prate * m;
-		frac = (*prate * f) / 100;
-		return (rate + frac);
+		if (rate > PS_PLL_VCO_MAX) {
+			fbdiv = DIV_ROUND_CLOSEST(rate, PS_PLL_VCO_MAX);
+			rate = rate / (fbdiv + 1);
+		}
+		if (rate < PS_PLL_VCO_MIN) {
+			fbdiv = DIV_ROUND_CLOSEST(PS_PLL_VCO_MIN, rate);
+			rate = rate * fbdiv;
+		}
+		return rate;
 	}
 
 	fbdiv = DIV_ROUND_CLOSEST(rate, *prate);
@@ -109,7 +147,7 @@ static unsigned long zynqmp_pll_recalc_rate(struct clk_hw *hw,
 		unsigned long parent_rate)
 {
 	struct zynqmp_pll *clk = to_zynqmp_pll(hw);
-	u32 fbdiv, div2, data;
+	u32 fbdiv, data;
 	unsigned long rate, frac;
 
 	/*
@@ -118,19 +156,67 @@ static unsigned long zynqmp_pll_recalc_rate(struct clk_hw *hw,
 	 */
 	fbdiv = (zynqmp_pm_mmio_readl(clk->pll_ctrl) & PLLCTRL_FBDIV_MASK) >>
 			PLLCTRL_FBDIV_SHIFT;
-	div2 = (zynqmp_pm_mmio_readl(clk->pll_ctrl) & PLLCTRL_DIV2_MASK) >>
-			PLLCTRL_DIV2_SHIFT;
-	if (div2)
-		fbdiv = fbdiv * 2;
 
 	rate =  parent_rate * fbdiv;
 	if (pll_frac_get_mode(hw) == PLL_MODE_FRAC) {
 		data = (zynqmp_pm_mmio_readl(clk->pll_ctrl + FRAC_OFFSET) &
 			0xffff);
-		frac = (rate * data) / FRAC_DIV;
+		frac = (parent_rate * data) / FRAC_DIV;
 		rate = rate + frac;
 	}
+
 	return rate;
+}
+
+static int zynqmp_pll_set_rate(struct clk_hw *hw, unsigned long rate,
+		unsigned long parent_rate)
+{
+	struct zynqmp_pll *clk = to_zynqmp_pll(hw);
+	u32 fbdiv, reg;
+	u32 data;
+	long rate_div, frac, m, f;
+
+	if (pll_frac_get_mode(hw) == PLL_MODE_FRAC) {
+		unsigned int children;
+
+		/*
+		 * We're running on a ZynqMP compatible machine, make sure the
+		 * VPLL only has one child.
+		 */
+		children = clk_get_children("vpll");
+
+		/* Account for vpll_to_lpd and dp_video_ref */
+		if (children > 2)
+			WARN(1, "Two devices are using vpll which is forbidden\n");
+
+		rate_div = ((rate * FRAC_DIV) / parent_rate);
+		m = rate_div / FRAC_DIV;
+		f = rate_div % FRAC_DIV;
+		m = clamp_t(u32, m, (PLL_FBDIV_MIN), (PLL_FBDIV_MAX));
+		rate = parent_rate * m;
+		frac = (parent_rate * f) / FRAC_DIV;
+		reg = zynqmp_pm_mmio_readl(clk->pll_ctrl);
+		reg &= ~PLLCTRL_FBDIV_MASK;
+		reg |= m << PLLCTRL_FBDIV_SHIFT;
+		zynqmp_pm_mmio_writel(reg, clk->pll_ctrl);
+		reg = zynqmp_pm_mmio_readl(clk->pll_ctrl + FRAC_OFFSET);
+		reg &= ~0xffff;
+
+		data = (FRAC_DIV * f) / FRAC_DIV;
+		data = data & 0xffff;
+		reg |= data;
+		zynqmp_pm_mmio_writel(reg, clk->pll_ctrl + FRAC_OFFSET);
+		return (rate + frac);
+	}
+
+	fbdiv = DIV_ROUND_CLOSEST(rate, parent_rate);
+	fbdiv = clamp_t(u32, fbdiv, PLL_FBDIV_MIN, PLL_FBDIV_MAX);
+	reg = zynqmp_pm_mmio_readl(clk->pll_ctrl);
+	reg &= ~PLLCTRL_FBDIV_MASK;
+	reg |= fbdiv << PLLCTRL_FBDIV_SHIFT;
+	zynqmp_pm_mmio_writel(reg, clk->pll_ctrl);
+
+	return parent_rate * fbdiv;
 }
 
 /**
@@ -143,8 +229,12 @@ static int zynqmp_pll_is_enabled(struct clk_hw *hw)
 {
 	u32 reg;
 	struct zynqmp_pll *clk = to_zynqmp_pll(hw);
+	int ret;
 
-	reg = zynqmp_pm_mmio_readl(clk->pll_ctrl);
+	ret = zynqmp_pm_mmio_read((u32)(ulong)clk->pll_ctrl, &reg);
+	if (ret)
+		pr_warn_once("Read fail pll address: %x\n",
+				(u32)(ulong)clk->pll_ctrl);
 
 	return !(reg & (PLLCTRL_RESET_MASK));
 }
@@ -166,10 +256,18 @@ static int zynqmp_pll_enable(struct clk_hw *hw)
 	pr_info("PLL: enable\n");
 
 	reg = zynqmp_pm_mmio_readl(clk->pll_ctrl);
+	reg |= PLLCTRL_BP_MASK;
+	zynqmp_pm_mmio_writel(reg, clk->pll_ctrl);
+	reg |= PLLCTRL_RESET_MASK;
+	zynqmp_pm_mmio_writel(reg, clk->pll_ctrl);
+
 	reg &= ~(PLLCTRL_RESET_MASK);
 	zynqmp_pm_mmio_writel(reg, clk->pll_ctrl);
 	while (!(zynqmp_pm_mmio_readl(clk->pll_status) & (1 << clk->lockbit)))
 		cpu_relax();
+
+	reg &= ~PLLCTRL_BP_MASK;
+	zynqmp_pm_mmio_writel(reg, clk->pll_ctrl);
 
 	return 0;
 }
@@ -198,7 +296,8 @@ static const struct clk_ops zynqmp_pll_ops = {
 	.disable = zynqmp_pll_disable,
 	.is_enabled = zynqmp_pll_is_enabled,
 	.round_rate = zynqmp_pll_round_rate,
-	.recalc_rate = zynqmp_pll_recalc_rate
+	.recalc_rate = zynqmp_pll_recalc_rate,
+	.set_rate = zynqmp_pll_set_rate,
 };
 
 /**
@@ -219,6 +318,7 @@ struct clk *clk_register_zynqmp_pll(const char *name, const char *parent,
 	struct zynqmp_pll *pll;
 	struct clk *clk;
 	struct clk_init_data init;
+	int status;
 
 	init.name = name;
 	init.ops = &zynqmp_pll_ops;
@@ -239,6 +339,10 @@ struct clk *clk_register_zynqmp_pll(const char *name, const char *parent,
 	clk = clk_register(NULL, &pll->hw);
 	if (WARN_ON(IS_ERR(clk)))
 		kfree(pll);
+
+	status = clk_set_rate_range(clk, PS_PLL_VCO_MIN, PS_PLL_VCO_MAX);
+	if (status < 0)
+		pr_err("%s:ERROR clk_set_rate_range failed %d\n", name, status);
 
 	return clk;
 }

@@ -24,7 +24,6 @@
 #include <linux/dmapool.h>
 #include <linux/slab.h>
 #include <linux/dma-mapping.h>
-#include <linux/dma-attrs.h>
 #include <linux/pagemap.h>
 #include <linux/device.h>
 #include <linux/types.h>
@@ -275,10 +274,12 @@ static void dump_cur_bd(struct xdma_chan *chan)
 			sizeof(struct xdma_desc_hw);
 
 	dev_err(chan->dev, "cur bd @ %08x\n",   (u32)DMA_IN(&chan->regs->cdr));
-	dev_err(chan->dev, "  buf  = 0x%08x\n", chan->bds[index]->src_addr);
+	dev_err(chan->dev, "  buf  = %p\n",
+		(void *)chan->bds[index]->src_addr);
 	dev_err(chan->dev, "  ctrl = 0x%08x\n", chan->bds[index]->control);
 	dev_err(chan->dev, "  sts  = 0x%08x\n", chan->bds[index]->status);
-	dev_err(chan->dev, "  next = 0x%08x\n", chan->bds[index]->next_desc);
+	dev_err(chan->dev, "  next = %p\n",
+		(void *)chan->bds[index]->next_desc);
 }
 
 static irqreturn_t xdma_rx_intr_handler(int irq, void *data)
@@ -637,7 +638,6 @@ static int pin_user_pages(xlnk_intptr_type uaddr,
 {
 	int status;
 	struct mm_struct *mm = current->mm;
-	struct task_struct *curr_task = current;
 	unsigned int first_page;
 	unsigned int last_page;
 	unsigned int num_pages;
@@ -657,7 +657,8 @@ static int pin_user_pages(xlnk_intptr_type uaddr,
 		return -ENOMEM;
 
 	down_read(&mm->mmap_sem);
-	status = get_user_pages(uaddr, num_pages, write, 1,
+	status = get_user_pages(uaddr, num_pages,
+				(write ? FOLL_WRITE : 0) | FOLL_FORCE,
 				mapped_pages, NULL);
 	up_read(&mm->mmap_sem);
 
@@ -735,35 +736,19 @@ struct xdma_chan *xdma_request_channel(char *name)
 	int i;
 	struct xdma_device *device, *tmp;
 
-	mutex_lock(&dma_list_mutex);
 	list_for_each_entry_safe(device, tmp, &dma_device_list, node) {
 		for (i = 0; i < device->channel_count; i++) {
-			if (device->chan[i]->client_count)
-				continue;
 			if (!strcmp(device->chan[i]->name, name)) {
-				device->chan[i]->client_count++;
-				mutex_unlock(&dma_list_mutex);
 				return device->chan[i];
 			}
 		}
 	}
-	mutex_unlock(&dma_list_mutex);
 	return NULL;
 }
 EXPORT_SYMBOL(xdma_request_channel);
 
 void xdma_release_channel(struct xdma_chan *chan)
-{
-	mutex_lock(&dma_list_mutex);
-	if (!chan->client_count) {
-		mutex_unlock(&dma_list_mutex);
-		return;
-	}
-	chan->client_count--;
-	dma_halt(chan);
-	xilinx_chan_desc_reinit(chan);
-	mutex_unlock(&dma_list_mutex);
-}
+{ }
 EXPORT_SYMBOL(xdma_release_channel);
 
 void xdma_release_all_channels(void)
@@ -776,7 +761,6 @@ void xdma_release_all_channels(void)
 			if (device->chan[i]->client_count) {
 				dma_halt(device->chan[i]);
 				xilinx_chan_desc_reinit(device->chan[i]);
-				device->chan[i]->client_count = 0;
 				pr_info("%s: chan %s freed\n",
 						__func__,
 						device->chan[i]->name);
@@ -806,7 +790,7 @@ int xdma_submit(struct xdma_chan *chan,
 	unsigned int sgcnt, sgcnt_dma;
 	enum dma_data_direction dmadir;
 	int status;
-	DEFINE_DMA_ATTRS(attrs);
+	unsigned long attrs = 0;
 
 	dmahead = kzalloc(sizeof(struct xdma_head), GFP_KERNEL);
 	if (!dmahead)
@@ -817,49 +801,48 @@ int xdma_submit(struct xdma_chan *chan,
 	dmahead->size = size;
 	dmahead->dmadir = chan->direction;
 	dmahead->userflag = user_flags;
+	dmahead->dmabuf = dp;
 	dmadir = chan->direction;
 
 	if (!(user_flags & CF_FLAG_CACHE_FLUSH_INVALIDATE))
-		dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
+		attrs |= DMA_ATTR_SKIP_CPU_SYNC;
 
 	if (dp) {
-		if (!dp->is_mapped) {
-			struct scatterlist *sg;
-			int cpy_size;
-			int i;
-			unsigned int remaining_size = size;
+		int i;
+		int cpy_size;
+		struct scatterlist *sg;
+		unsigned int remaining_size = size;
+		unsigned int observed_size = 0;
 
-			dp->dbuf_attach = dma_buf_attach(dp->dbuf, chan->dev);
-			dp->dbuf_sg_table = dma_buf_map_attachment(
-				dp->dbuf_attach, chan->direction);
-
-			if (IS_ERR_OR_NULL(dp->dbuf_sg_table)) {
-				pr_err("%s unable to map sg_table for dbuf: %d\n",
-					__func__, (int)dp->dbuf_sg_table);
-				return -EINVAL;
+		dp->dbuf_attach = dma_buf_attach(dp->dbuf, chan->dev);
+		dp->dbuf_sg_table = dma_buf_map_attachment(dp->dbuf_attach,
+							   chan->direction);
+		if (IS_ERR_OR_NULL(dp->dbuf_sg_table)) {
+			pr_err("%s unable to map sg_table for dbuf: %p\n",
+			       __func__, dp->dbuf_sg_table);
+			return -EINVAL;
+		}
+		cpy_size = dp->dbuf_sg_table->nents *
+			sizeof(struct scatterlist);
+		dp->sg_list = kmalloc(cpy_size, GFP_KERNEL);
+		if (!dp->sg_list)
+			return -ENOMEM;
+		dp->sg_list_cnt = 0;
+		memcpy(dp->sg_list, dp->dbuf_sg_table->sgl, cpy_size);
+		for_each_sg(dp->sg_list,
+			    sg,
+			    dp->dbuf_sg_table->nents,
+			    i) {
+			observed_size += sg_dma_len(sg);
+			if (remaining_size == 0) {
+				sg_dma_len(sg) = 0;
+			} else if (sg_dma_len(sg) > remaining_size) {
+				sg_dma_len(sg) = remaining_size;
+				dp->sg_list_cnt++;
+			} else {
+				remaining_size -= sg_dma_len(sg);
+				dp->sg_list_cnt++;
 			}
-			cpy_size = dp->dbuf_sg_table->nents *
-				sizeof(struct scatterlist);
-			dp->sg_list = kmalloc(cpy_size, GFP_KERNEL);
-			if (!dp->sg_list)
-				return -ENOMEM;
-			dp->sg_list_cnt = 0;
-			memcpy(dp->sg_list, dp->dbuf_sg_table->sgl, cpy_size);
-			for_each_sg(dp->sg_list,
-				    sg,
-				    dp->dbuf_sg_table->nents,
-				    i) {
-				if (remaining_size == 0) {
-					sg_dma_len(sg) = 0;
-				} else if (sg_dma_len(sg) > remaining_size) {
-					sg_dma_len(sg) = remaining_size;
-					dp->sg_list_cnt++;
-				} else {
-					remaining_size -= sg_dma_len(sg);
-					dp->sg_list_cnt++;
-				}
-			}
-			dp->is_mapped = 1;
 		}
 
 		sglist_dma = dp->sg_list;
@@ -867,7 +850,6 @@ int xdma_submit(struct xdma_chan *chan,
 		sgcnt = dp->sg_list_cnt;
 		sgcnt_dma = dp->sg_list_cnt;
 		dmahead->userbuf = (xlnk_intptr_type)sglist->dma_address;
-		dmahead->is_dmabuf = 1;
 	} else if (user_flags & CF_FLAG_PHYSICALLY_CONTIGUOUS) {
 		sglist = chan->scratch_sglist;
 		sgcnt = phy_buf_to_sgl(userbuf, size, sglist);
@@ -881,7 +863,7 @@ int xdma_submit(struct xdma_chan *chan,
 							sglist,
 							sgcnt,
 							dmadir,
-							&attrs);
+							attrs);
 
 		if (!status) {
 			pr_err("sg contiguous mapping failed\n");
@@ -897,7 +879,7 @@ int xdma_submit(struct xdma_chan *chan,
 		}
 
 		status = get_dma_ops(chan->dev)->map_sg(chan->dev, sglist,
-							sgcnt, dmadir, &attrs);
+							sgcnt, dmadir, attrs);
 		if (!status) {
 			pr_err("dma_map_sg failed\n");
 			unpin_user_pages(sglist, sgcnt);
@@ -909,7 +891,7 @@ int xdma_submit(struct xdma_chan *chan,
 		sgcnt_dma = sgl_merge(sglist, sgcnt, sglist_dma);
 		if (!sgcnt_dma) {
 			get_dma_ops(chan->dev)->unmap_sg(chan->dev, sglist,
-							 sgcnt, dmadir, &attrs);
+							 sgcnt, dmadir, attrs);
 			unpin_user_pages(sglist, sgcnt);
 			return -ENOMEM;
 		}
@@ -934,7 +916,7 @@ int xdma_submit(struct xdma_chan *chan,
 		pr_err("setup hw desc failed\n");
 		if (!(user_flags & CF_FLAG_PHYSICALLY_CONTIGUOUS)) {
 			get_dma_ops(chan->dev)->unmap_sg(chan->dev, sglist,
-							 sgcnt, dmadir, &attrs);
+							 sgcnt, dmadir, attrs);
 			unpin_user_pages(sglist, sgcnt);
 		}
 		return -ENOMEM;
@@ -950,13 +932,14 @@ int xdma_wait(struct xdma_head *dmahead,
 	      unsigned int *operating_flags)
 {
 	struct xdma_chan *chan = dmahead->chan;
-	DEFINE_DMA_ATTRS(attrs);
+	unsigned long attrs = 0;
+
 	if (chan->poll_mode) {
 		xilinx_chan_desc_cleanup(chan);
 		*operating_flags |= XDMA_FLAGS_WAIT_COMPLETE;
 	} else {
 		if (*operating_flags & XDMA_FLAGS_TRYWAIT) {
-			if (!wait_for_completion_timeout(&dmahead->cmp, 1))
+			if (!try_wait_for_completion(&dmahead->cmp))
 				return 0;
 			*operating_flags |= XDMA_FLAGS_WAIT_COMPLETE;
 		} else {
@@ -965,20 +948,26 @@ int xdma_wait(struct xdma_head *dmahead,
 		}
 	}
 
-	if (!(user_flags & CF_FLAG_CACHE_FLUSH_INVALIDATE))
-		dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-
-	if (dmahead->is_dmabuf) {
-		dmahead->is_dmabuf = 0;
+	if (dmahead->dmabuf) {
+		dma_buf_unmap_attachment(dmahead->dmabuf->dbuf_attach,
+					 dmahead->dmabuf->dbuf_sg_table,
+					 dmahead->dmabuf->dma_direction);
+		kfree(dmahead->dmabuf->sg_list);
+		dma_buf_detach(dmahead->dmabuf->dbuf,
+			       dmahead->dmabuf->dbuf_attach);
 	} else {
+		if (!(user_flags & CF_FLAG_CACHE_FLUSH_INVALIDATE))
+			attrs |= DMA_ATTR_SKIP_CPU_SYNC;
+
 		get_dma_ops(chan->dev)->unmap_sg(chan->dev,
 						 dmahead->sglist,
 						 dmahead->sgcnt,
 						 dmahead->dmadir,
-						 &attrs);
+						 attrs);
 		if (!(user_flags & CF_FLAG_PHYSICALLY_CONTIGUOUS))
 			unpin_user_pages(dmahead->sglist, dmahead->sgcnt);
 	}
+
 	return 0;
 }
 EXPORT_SYMBOL(xdma_wait);
@@ -1063,9 +1052,8 @@ static int xdma_probe(struct platform_device *pdev)
 	int dma_chan_dir;
 	int dma_chan_reg_offset;
 
-	pr_info("%s: probe dma %x, nres %d, id %d\n", __func__,
-		 (unsigned int)&pdev->dev,
-		 pdev->num_resources, pdev->id);
+	pr_info("%s: probe dma %p, nres %d, id %d\n", __func__,
+		&pdev->dev, pdev->num_resources, pdev->id);
 
 	xdev = devm_kzalloc(&pdev->dev, sizeof(struct xdma_device), GFP_KERNEL);
 	if (!xdev) {

@@ -62,8 +62,14 @@ static unsigned long zynqmp_clk_divider_recalc_rate(struct clk_hw *hw,
 {
 	struct clk_divider *divider = to_clk_divider(hw);
 	unsigned int val;
+	int ret;
 
-	val = zynqmp_pm_mmio_readl(divider->reg) >> divider->shift;
+	ret = zynqmp_pm_mmio_read((u32)(ulong)divider->reg, &val);
+	if (ret)
+		pr_warn_once("Read fail divider address: %x\n",
+				(u32)(ulong)divider->reg);
+
+	val = val >> divider->shift;
 	val &= div_mask(divider->width);
 
 	return divider_recalc_rate(hw, parent_rate, val, divider->table,
@@ -85,8 +91,11 @@ static long zynqmp_clk_divider_round_rate(struct clk_hw *hw,
 		return DIV_ROUND_UP_ULL((u64)*prate, bestdiv);
 	}
 
-	return divider_round_rate(hw, rate, prate, divider->table,
-				  divider->width, divider->flags);
+	bestdiv = divider_get_val(rate, *prate, divider->table, divider->width,
+			divider->flags);
+	*prate = rate * bestdiv;
+
+	return rate;
 }
 
 static int zynqmp_clk_divider_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -95,6 +104,7 @@ static int zynqmp_clk_divider_set_rate(struct clk_hw *hw, unsigned long rate,
 	struct clk_divider *divider = to_clk_divider(hw);
 	unsigned int value;
 	u32 val;
+	int ret;
 
 	value = divider_get_val(rate, parent_rate, divider->table,
 				divider->width, divider->flags);
@@ -102,11 +112,17 @@ static int zynqmp_clk_divider_set_rate(struct clk_hw *hw, unsigned long rate,
 	if (divider->flags & CLK_DIVIDER_HIWORD_MASK) {
 		val = div_mask(divider->width) << (divider->shift + 16);
 	} else {
-		val = zynqmp_pm_mmio_readl(divider->reg);
+		ret = zynqmp_pm_mmio_read((u32)(ulong)divider->reg, &val);
+		if (ret)
+			pr_warn_once("Read fail divider address: %x\n",
+					(u32)(ulong)divider->reg);
 		val &= ~(div_mask(divider->width) << divider->shift);
 	}
 	val |= value << divider->shift;
-	zynqmp_pm_mmio_writel(val, divider->reg);
+	ret = zynqmp_pm_mmio_writel(val, divider->reg);
+	if (ret)
+		pr_warn_once("Write failed to divider address:%x\n",
+				(u32)(ulong)divider->reg);
 
 	return 0;
 }

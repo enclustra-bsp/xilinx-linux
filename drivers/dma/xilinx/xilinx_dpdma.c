@@ -1888,7 +1888,7 @@ static int xilinx_dpdma_probe(struct platform_device *pdev)
 	struct dma_device *ddev;
 	struct resource *res;
 	struct device_node *node, *child;
-	u32 i, freq;
+	u32 i;
 	int irq, ret;
 
 	xdev = devm_kzalloc(&pdev->dev, sizeof(*xdev), GFP_KERNEL);
@@ -1964,21 +1964,6 @@ static int xilinx_dpdma_probe(struct platform_device *pdev)
 		dev_err(xdev->dev, "failed to enable the axi clock\n");
 		goto error;
 	}
-
-	ret = of_property_read_u32(node, "xlnx,axi-clock-freq", &freq);
-	if (ret < 0) {
-		dev_dbg(xdev->dev, "No axi clock freq in DT. Set to 533Mhz\n");
-		freq = 533000000;
-	}
-
-	ret = clk_set_rate(xdev->axi_clk, freq);
-	if (ret) {
-		dev_err(xdev->dev, "failed to set the axi clock\n");
-		return ret;
-	}
-
-	dev_dbg(xdev->dev, "axi clock freq: req = %u act = %lu\n", freq,
-		clk_get_rate(xdev->axi_clk));
 
 	ret = dma_async_device_register(ddev);
 	if (ret) {
