@@ -13,7 +13,7 @@
 /dts-v1/;
 
 #include "zynqmp.dtsi"
-#include "zynqmp-clk.dtsi"
+#include "zynqmp-clk-ccf.dtsi"
 #include "zynq-enclustra-qspi64-parts.dtsi"
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/pinctrl/pinctrl-zynqmp.h>
@@ -51,8 +51,8 @@
 	mdio {
 		compatible = "cdns,macb-mdio";
 		reg = <0x0 0xff0b0000 0x0 0x1000>;
-		clocks = <&clk125>, <&clk125>, <&clk125>;
-		clock-names = "pclk", "hclk", "tx_clk";
+		clocks =  <&clkc 45>, <&clkc 45>, <&clkc 49>;
+		clock-names = "pclk", "tx_clk", "hclk";
 		#address-cells = <1>;
 		#size-cells = <0>;
 		phy7: ethernet-phy@7 {
