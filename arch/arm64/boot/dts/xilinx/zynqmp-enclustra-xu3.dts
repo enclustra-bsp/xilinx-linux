@@ -23,7 +23,7 @@
 	compatible = "xlnx,zynqmp";
 
 	aliases {
-		ethernet0 = &gem0;
+		ethernet0 = &gem3;
 		gpio0 = &gpio;
 		i2c0 = &i2c0;
 		i2c1 = &i2c1;
@@ -49,14 +49,11 @@
 
 	mdio {
 		compatible = "cdns,macb-mdio";
-		reg = <0x0 0xff0b0000 0x0 0x1000>;
+		reg = <0x0 0xff0e0000 0x0 0x1000>;
 		clocks = <&clk125>, <&clk125>, <&clk125>;
 		clock-names = "pclk", "hclk", "tx_clk";
 		#address-cells = <1>;
 		#size-cells = <0>;
-		phy7: ethernet-phy@7 {
-			reg = <7>;
-		};
 		phy3: ethernet-phy@3 {
 			reg = <3>;
 		};
@@ -113,7 +110,7 @@
 	xlnx,include-sg; /* for testing purpose */
 };
 
-&gem0 {
+&gem3 {
 	status = "okay";
 	local-mac-address = [00 0a 35 00 02 90];
 	phy-mode = "rgmii-id";
