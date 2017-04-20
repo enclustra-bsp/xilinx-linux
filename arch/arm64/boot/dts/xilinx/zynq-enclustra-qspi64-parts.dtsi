@@ -12,9 +12,9 @@
 		#size-cells = <1>;
 		partition@qspi-bootimage {
 			label = "qspi-bootimage";
-			reg = <0x0 0x4000000>;
+			reg = <0x0 0x700000>;
 		};
-		/*partition@qspi-kernel {
+		partition@qspi-kernel {
 			label = "qspi-kernel";
 			reg = <0x700000 0x500000>;
 		};
@@ -33,6 +33,6 @@
 		partition@qspi-rootfs {
 			label = "qspi-rootfs";
 			reg = <0xD40000 0x32C0000>;
-		};*/
+		};
 	};
 };
