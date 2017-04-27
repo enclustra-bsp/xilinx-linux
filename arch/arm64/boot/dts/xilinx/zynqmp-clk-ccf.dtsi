@@ -261,11 +261,11 @@
 };
 
 &usb0 {
-	clocks = <&clkc 32>,  <&clkc 34>;
+	clocks = <&clkc 32>,  <&clkc 35>;
 };
 
 &usb1 {
-	clocks = <&clkc 33>,  <&clkc 34>;
+	clocks = <&clkc 33>,  <&clkc 36>;
 };
 
 &watchdog0 {
