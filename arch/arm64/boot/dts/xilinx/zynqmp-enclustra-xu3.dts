@@ -63,6 +63,14 @@
 	status = "okay";
 };
 
+&fclk0 {
+	status = "okay";
+};
+
+&fclk1 {
+	status = "okay";
+};
+
 /* fpd_dma clk 667MHz, lpd_dma 500MHz */
 &fpd_dma_chan1 {
 	status = "okay";

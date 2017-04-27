@@ -64,6 +64,14 @@
 	};
 };
 
+&fclk0 {
+	status = "okay";
+};
+
+&fclk1 {
+	status = "okay";
+};
+
 &dcc {
 	status = "okay";
 };
