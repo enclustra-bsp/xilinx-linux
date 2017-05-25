@@ -533,7 +533,6 @@ static int spi_nor_erase(struct mtd_info *mtd, struct erase_info *instr)
 	} else {
 		while (len) {
 
-			write_enable(nor);
 			offset = addr;
 			if (nor->isparallel == 1)
 				offset /= 2;
@@ -548,6 +547,12 @@ static int spi_nor_erase(struct mtd_info *mtd, struct erase_info *instr)
 						~SPI_MASTER_U_PAGE;
 				}
 			}
+
+			/* Wait until finished previous write command. */
+			ret = spi_nor_wait_till_ready(nor);
+			if (ret)
+				goto erase_err;
+
 			if (nor->addr_width == 3) {
 				/* Update Extended Address Register */
 				ret = write_ear(nor, offset);
@@ -557,6 +562,9 @@ static int spi_nor_erase(struct mtd_info *mtd, struct erase_info *instr)
 			ret = spi_nor_wait_till_ready(nor);
 			if (ret)
 				goto erase_err;
+
+			write_enable(nor);
+
 			ret = spi_nor_erase_sector(nor, offset);
 			if (ret)
 				goto erase_err;
@@ -1546,36 +1554,76 @@ static int spi_nor_write(struct mtd_info *mtd, loff_t to, size_t len,
 	size_t *retlen, const u_char *buf)
 {
 	struct spi_nor *nor = mtd_to_spi_nor(mtd);
-	size_t page_offset, page_remain, i;
-	ssize_t ret;
-	u32 offset, stack_shift=0;
-	u8 bank = 0;
+	u32 page_offset, page_size, i;
+	int ret;
+
+	dev_dbg(nor->dev, "to 0x%08x, len %zd\n", (u32)to, len);
+	/* Wait until finished previous write command. */
+	ret = spi_nor_wait_till_ready(nor);
+	if (ret)
+		return ret;
+
+	write_enable(nor);
+
+	page_offset = to & (nor->page_size - 1);
+
+	/* do all the bytes fit onto one page? */
+	if (page_offset + len <= nor->page_size) {
+		*retlen += nor->write(nor, to >> nor->shift, len, buf);
+	} else {
+		/* the size of data remaining on the first page */
+		page_size = nor->page_size - page_offset;
+		*retlen += nor->write(nor, to >> nor->shift, page_size, buf);
+
+		/* write everything in nor->page_size chunks */
+		for (i = page_size; i < len; i += page_size) {
+			page_size = len - i;
+			if (page_size > nor->page_size)
+				page_size = nor->page_size;
+
+			ret = spi_nor_wait_till_ready(nor);
+			if (ret)
+				return ret;
+			write_enable(nor);
+
+			*retlen += nor->write(nor, (to + i) >> nor->shift, page_size,
+				   buf + i);
+		}
+	}
+
+	return 0;
+}
+
+static int spi_nor_write_ext(struct mtd_info *mtd, loff_t to, size_t len,
+	size_t *retlen, const u_char *buf)
+{
+	struct spi_nor *nor = mtd_to_spi_nor(mtd);
+	u32 addr = to;
+	u32 offset = to;
+	u32 write_len = 0;
+	size_t actual_len = 0;
+	u32 write_count = 0;
 	u32 rem_bank_len = 0;
+	u8 bank = 0;
+	u8 stack_shift = 0;
+	int ret;
 
 #define OFFSET_16_MB 0x1000000
 
 	dev_dbg(nor->dev, "to 0x%08x, len %zd\n", (u32)to, len);
+
 	ret = spi_nor_lock_and_prep(nor, SPI_NOR_OPS_WRITE);
 	if (ret)
 		return ret;
-	for (i = 0; i < len; ) {
-		ssize_t written;
 
+	while (len) {
+		actual_len = 0;
 		if (nor->addr_width == 3) {
-			bank = (u32)to / (OFFSET_16_MB << nor->shift);
+			bank = addr / (OFFSET_16_MB << nor->shift);
 			rem_bank_len = ((OFFSET_16_MB << nor->shift) *
-							(bank + 1)) - to;
+							(bank + 1)) - addr;
 		}
-
-		page_offset = ((to + i)) & (nor->page_size - 1);
-		WARN_ONCE(page_offset,
-			  "Writing at offset %zu into a NOR page. Writing partial pages may decrease reliability and increase wear of NOR flash.",
-			  page_offset);
-
-		offset = (to + i);
-
-		if (nor->isparallel == 1)
-			offset /= 2;
+		offset = addr;
 
 		if (nor->isstacked == 1) {
 			stack_shift = 1;
@@ -1586,45 +1634,27 @@ static int spi_nor_write(struct mtd_info *mtd, loff_t to, size_t len,
 				nor->spi->master->flags &= ~SPI_MASTER_U_PAGE;
 			}
 		}
-
 		/* Die cross over issue is not handled */
 		if (nor->addr_width == 4)
 			rem_bank_len = (mtd->size >> stack_shift) - offset;
 		if (nor->addr_width == 3)
 			write_ear(nor, (offset >> nor->shift));
-		if (len < rem_bank_len) {
-			page_remain = min_t(size_t,
-				    nor->page_size - page_offset, len - i);
+		if (len < rem_bank_len)
+			write_len = len;
+		else
+			write_len = rem_bank_len;
 
-		}
-		else {
-		/* the size of data remaining on the first page */
-			page_remain = rem_bank_len;
-		}
-		ret = spi_nor_wait_till_ready(nor);
+		ret = spi_nor_write(mtd, offset, write_len, &actual_len, buf);
 		if (ret)
 			goto write_err;
 
-		write_enable(nor);
-
-		ret = nor->write(nor, (offset), page_remain, buf + i);
-		if (ret < 0)
-			goto write_err;
-		written = ret;
-
-		ret = spi_nor_wait_till_ready(nor);
-		if (ret)
-			goto write_err;
-		*retlen += written;
-		i += written;
-		if (written != page_remain) {
-			dev_err(nor->dev,
-				"While writing %zu bytes written %zd bytes\n",
-				page_remain, written);
-			ret = -EIO;
-			goto write_err;
-		}
+		addr += actual_len;
+		len -= actual_len;
+		buf += actual_len;
+		write_count += actual_len;
 	}
+
+	*retlen = write_count;
 
 write_err:
 	spi_nor_unlock_and_unprep(nor, SPI_NOR_OPS_WRITE);
@@ -1878,7 +1908,7 @@ int spi_nor_scan(struct spi_nor *nor, const char *name, enum read_mode mode)
 	if (info->flags & SST_WRITE)
 		mtd->_write = sst_write;
 	else
-		mtd->_write = spi_nor_write;
+		mtd->_write = spi_nor_write_ext;
 
 	if (info->flags & USE_FSR)
 		nor->flags |= SNOR_F_USE_FSR;
