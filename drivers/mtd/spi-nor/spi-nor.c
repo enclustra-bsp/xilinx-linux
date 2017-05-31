@@ -2086,10 +2086,23 @@ static const struct flash_info *spi_nor_match_id(const char *name)
 void spi_nor_shutdown(struct spi_nor *nor)
 {
 	struct mtd_info *mtd = &nor->mtd;
+	int code;
 
 	if (nor->addr_width == 3 &&
-		(mtd->size >> nor->shift) > 0x1000000)
-		write_ear(nor, 0);
+		(mtd->size >> nor->shift) > 0x1000000) {
+		if (spi_nor_wait_till_ready(nor))
+			return;
+
+		if (nor->jedec_id == CFI_MFR_AMD)
+			code = SPINOR_OP_BRWR;
+		if (nor->jedec_id == CFI_MFR_ST) {
+			write_enable(nor);
+			code = SPINOR_OP_WREAR;
+		}
+		nor->cmd_buf[0] = 0;
+
+		nor->write_reg(nor, code, nor->cmd_buf, 1);
+	}
 }
 EXPORT_SYMBOL_GPL(spi_nor_shutdown);
 
