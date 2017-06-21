@@ -916,7 +916,7 @@ dtb-$(CONFIG_ARCH_ZYNQ) += \
 	zynq-mercury-zx1-nand.dtb \
 	zynq-mercury-zx5.dtb \
 	zynq-mercury-zx5-nand.dtb \
-	zynq-cosmos.dtb \
+	zynq-cosmos-xzq10.dtb \
 	zynq-zed.dtb \
 	zynq-zybo.dtb
 dtb-$(CONFIG_MACH_ARMADA_370) += \

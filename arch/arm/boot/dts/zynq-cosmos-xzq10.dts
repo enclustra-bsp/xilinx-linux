@@ -17,7 +17,7 @@
 /include/ "zynq-enclustra-qspi-parts.dtsi"
 
 / {
-	model = "Enclustra Cosmos Board";
+	model = "Enclustra Cosmos XZQ10 Board";
 };
 
 &uart0 {
