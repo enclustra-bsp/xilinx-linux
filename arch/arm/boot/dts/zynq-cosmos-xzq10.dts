@@ -34,5 +34,16 @@
 		reg = <0x74>;
 		#address-cells = <1>;
 		#size-cells = <0>;
+
+		i2c_mux@0 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <0>;
+
+			lm96080@2f {
+				compatible = "lm80";
+				reg = <0x2f>;
+			};
+		};
 	};
 };
