@@ -27,3 +27,12 @@
 &isl12022 {
 	status = "okay";
 };
+
+&i2c0 {
+	i2c_mux: i2c_mux@74 {
+		compatible = "nxp,pca9547";
+		reg = <0x74>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+	};
+};
