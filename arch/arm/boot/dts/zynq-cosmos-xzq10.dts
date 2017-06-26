@@ -40,6 +40,11 @@
 			#size-cells = <0>;
 			reg = <0>;
 
+			pcal6416@20 {
+				compatible = "ti,tca6416";
+				reg = <0x20>;
+			};
+
 			lm96080@2f {
 				compatible = "lm80";
 				reg = <0x2f>;
