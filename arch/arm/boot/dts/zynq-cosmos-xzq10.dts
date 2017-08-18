@@ -29,8 +29,31 @@
 	status = "okay";
 };
 
+&sdhci1 {
+	status = "okay";
+	non-removable;
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_sdhci1_default>;
+};
+
 &isl12022 {
 	status = "okay";
+};
+
+&pinctrl0 {
+	pinctrl_sdhci1_default: sdhci1-default {
+		mux {
+			function = "sdio1";
+			groups = "sdio1_0_grp";
+		};
+
+		conf {
+			groups = "sdio1_0_grp";
+			slew-rate = <0>;
+			io-standard = <1>;
+			bias-disable;
+		};
+	};
 };
 
 &i2c0 {
