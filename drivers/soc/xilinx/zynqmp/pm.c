@@ -32,6 +32,8 @@
 #include <linux/debugfs.h>
 #include <linux/suspend.h>
 #include <linux/soc/xilinx/zynqmp/pm.h>
+#include <linux/notifier.h>
+#include <linux/reboot.h>
 
 /* SMC SIP service Call Function Identifier Prefix */
 #define PM_SIP_SVC	0xC2000000
@@ -1630,9 +1632,22 @@ static struct platform_driver zynqmp_pm_platform_driver = {
 };
 builtin_platform_driver(zynqmp_pm_platform_driver);
 
+static int zynqmp_reboot_cb(struct notifier_block *self,
+				unsigned long val,
+				void *data){
+	if (val == SYS_RESTART)
+		zynqmp_pm_reset_assert(0x45A, 0x2);
+	return NOTIFY_DONE;
+};
+
+static struct notifier_block zynqmp_reboot_notifier = {
+	.notifier_call = zynqmp_reboot_cb,
+};
+
 static int __init zynqmp_plat_init(void)
 {
 	struct device_node *np;
+	int idcode, version;
 	int ret = 0;
 
 	np = of_find_compatible_node(NULL, NULL, "xlnx,zynqmp");
@@ -1654,6 +1669,14 @@ static int __init zynqmp_plat_init(void)
 		       __func__,
 		       ZYNQMP_PM_VERSION_MAJOR, ZYNQMP_PM_VERSION_MINOR,
 		       pm_api_version >> 16, pm_api_version & 0xffff);
+	}
+
+	/* Reboot hack for ZynqMP ES1 and ES2 silicon:
+	 * Standard reboot procedure doesn't work for ES1 and ES2 silicon.
+	 * More information: https://www.xilinx.com/support/answers/68514.html */
+	zynqmp_pm_get_chipid(&idcode, &version);
+	if (((version & 0xF) == 0) || ((version & 0xF) == 1)){
+		register_reboot_notifier(&zynqmp_reboot_notifier);
 	}
 
 	pr_info("%s Power management API v%d.%d\n", __func__,
