@@ -1368,7 +1368,7 @@ static struct clk_core *clk_calc_new_rates(struct clk_core *core,
 	unsigned long min_rate;
 	unsigned long max_rate;
 	int p_index = 0;
-	long ret;
+	unsigned long ret;
 
 	/* sanity */
 	if (IS_ERR_OR_NULL(core))
