@@ -104,28 +104,28 @@
 				/* output */
 				clkout0 {
 					reg = <0>;
-					silabs,drive-config = "1V8_LVDS";
-					silabs,clock-source = <SI5338_OUT_MUX_MS0>;
+					silabs,drive-config = "3V3_LVDS";
+					silabs,clock-source = <SI5338_OUT_MUX_MSN>;
 					silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
 					clock-frequency = <125000000>;
 				};
 				clkout1 {
 					reg = <1>;
-					silabs,drive-config = "1V8_LVDS";
+					silabs,drive-config = "3V3_LVDS";
 					silabs,clock-source = <SI5338_OUT_MUX_MSN>;
 					silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
 					clock-frequency = <125000000>;
 				};
 				clkout2 {
 					reg = <2>;
-					silabs,drive-config = "1V8_LVDS";
+					silabs,drive-config = "3V3_LVDS";
 					silabs,clock-source = <SI5338_OUT_MUX_MSN>;
 					silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
 					clock-frequency = <125000000>;
 				};
 				clkout3 {
 					reg = <3>;
-					silabs,drive-config = "1V8_LVDS";
+					silabs,drive-config = "3V3_LVDS";
 					silabs,clock-source = <SI5338_OUT_MUX_MSN>;
 					silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
 					clock-frequency = <125000000>;
