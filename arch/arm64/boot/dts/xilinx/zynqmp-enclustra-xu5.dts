@@ -25,7 +25,6 @@
 
 	aliases {
 		ethernet0 = &gem0;
-		ethernet1 = &gem3;
 		gpio0 = &gpio;
 		i2c0 = &i2c0;
 		mmc0 = &sdhci1;
@@ -55,9 +54,6 @@
 		clock-names = "pclk", "tx_clk", "hclk";
 		#address-cells = <1>;
 		#size-cells = <0>;
-		phy7: ethernet-phy@7 {
-			reg = <7>;
-		};
 		phy3: ethernet-phy@3 {
 			reg = <3>;
 		};
@@ -125,15 +121,6 @@
 	phy-handle = <&phy3>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_gem0_default>;
-};
-
-&gem3 {
-	status = "okay";
-	local-mac-address = [00 0a 35 00 02 91];
-	phy-mode = "rgmii-id";
-	phy-handle = <&phy7>;
-	pinctrl-names = "default";
-	pinctrl-0 = <&pinctrl_gem3_default>;
 };
 
 &gpio {
@@ -328,33 +315,6 @@
 			pins = "MIO54", "MIO56", "MIO57", "MIO58", "MIO59",
 				   "MIO60", "MIO61", "MIO62", "MIO63";
 			bias-disable;
-		};
-	};
-
-	pinctrl_gem3_default: gem3-default {
-		mux {
-			function = "ethernet3";
-			groups = "ethernet3_0_grp";
-		};
-
-		conf {
-			groups = "ethernet3_0_grp";
-			slew-rate = <SLEW_RATE_SLOW>;
-			io-standard = <IO_STANDARD_LVCMOS18>;
-		};
-
-		conf-rx {
-			pins = "MIO70", "MIO71", "MIO72", "MIO73", "MIO74",
-									"MIO75";
-			bias-high-impedance;
-			low-power-disable;
-		};
-
-		conf-tx {
-			pins = "MIO64", "MIO65", "MIO66", "MIO67", "MIO68",
-									"MIO69";
-			bias-disable;
-			low-power-enable;
 		};
 	};
 
