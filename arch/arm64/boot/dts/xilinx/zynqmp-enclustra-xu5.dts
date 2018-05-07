@@ -35,6 +35,7 @@
 		serial2 = &dcc;
 		spi0 = &qspi;
 		usb0 = &usb0;
+		usb1 = &usb1;
 	};
 
 	chosen {
@@ -212,7 +213,19 @@
 	pinctrl-0 = <&pinctrl_usb0_default>;
 };
 
+&usb1 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_usb1_default>;
+};
+
 &dwc3_0 {
+	status = "okay";
+	dr_mode = "host";
+	maximum-speed = "high-speed";
+};
+
+&dwc3_1 {
 	status = "okay";
 	dr_mode = "host";
 	maximum-speed = "high-speed";
@@ -314,6 +327,30 @@
 		conf-tx {
 			pins = "MIO54", "MIO56", "MIO57", "MIO58", "MIO59",
 				   "MIO60", "MIO61", "MIO62", "MIO63";
+			bias-disable;
+		};
+	};
+
+	pinctrl_usb1_default: usb1-default {
+		mux {
+			function = "usb1";
+			groups = "usb1_0_grp";
+		};
+
+		conf {
+			groups = "usb1_0_grp";
+			slew-rate = <SLEW_RATE_SLOW>;
+			io-standard = <IO_STANDARD_LVCMOS18>;
+		};
+
+		conf-rx {
+			pins = "MIO64", "MIO65", "MIO67";
+			bias-high-impedance;
+		};
+
+		conf-tx {
+			pins = "MIO66", "MIO68", "MIO69", "MIO70", "MIO71",
+			     "MIO72", "MIO73", "MIO74", "MIO75";
 			bias-disable;
 		};
 	};
