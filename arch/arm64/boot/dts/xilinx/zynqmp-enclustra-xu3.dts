@@ -49,7 +49,7 @@
 	mdio {
 		compatible = "cdns,macb-mdio";
 		reg = <0x0 0xff0e0000 0x0 0x1000>;
-		clocks =  <&clkc 45>, <&clkc 45>, <&clkc 49>;
+		clocks =  <&clk 45>, <&clk 45>, <&clk 49>;
 		clock-names = "pclk", "tx_clk", "hclk";
 		#address-cells = <1>;
 		#size-cells = <0>;
