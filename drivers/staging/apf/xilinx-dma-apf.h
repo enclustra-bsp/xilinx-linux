@@ -40,7 +40,7 @@
  */
 #define XDMA_RESET_LOOP            1000000
 #define XDMA_HALT_LOOP             1000000
-#define XDMA_NO_CHANGE             0xFFFF;
+#define XDMA_NO_CHANGE             0xFFFF
 
 /* General register bits definitions
  */
@@ -153,7 +153,8 @@ struct xdma_regs {
 	u32 dst;       /* 0x20 Destination Address Register (cdma) */
 	u32 dst_hi;
 	u32 btt_ref;   /* 0x28 Bytes To Transfer (cdma) or
-					park_ref (vdma) */
+			*		park_ref (vdma)
+			*/
 	u32 version;   /* 0x2c version (vdma) */
 };
 
@@ -178,7 +179,6 @@ struct xdma_chan {
 	int    max_len;				/* Maximum len per transfer */
 	int    err;				/* Channel has errors */
 	int    client_count;
-	struct scatterlist scratch_sglist[XDMA_MAX_BD_CNT];
 };
 
 struct xdma_device {
@@ -194,8 +194,10 @@ struct xdma_head {
 	unsigned int size;
 	unsigned int dmaflag;
 	enum dma_data_direction dmadir;
-	void *sglist;
+	struct scatterlist *sglist;
 	unsigned int sgcnt;
+	struct scatterlist *pagelist;
+	unsigned int pagecnt;
 	struct completion cmp;
 	struct xdma_chan *chan;
 	unsigned int nappwords_o;

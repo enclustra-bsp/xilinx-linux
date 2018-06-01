@@ -807,9 +807,6 @@ static struct dma_async_tx_descriptor *zynqmp_dma_prep_memcpy(
 
 	chan = to_chan(dchan);
 
-	if (len > ZYNQMP_DMA_MAX_TRANS_LEN)
-		return NULL;
-
 	desc_cnt = DIV_ROUND_UP(len, ZYNQMP_DMA_MAX_TRANS_LEN);
 
 	spin_lock_bh(&chan->lock);
@@ -946,7 +943,8 @@ static void zynqmp_dma_chan_remove(struct zynqmp_dma_chan *chan)
 	if (!chan)
 		return;
 
-	devm_free_irq(chan->zdev->dev, chan->irq, chan);
+	if (chan->irq)
+		devm_free_irq(chan->zdev->dev, chan->irq, chan);
 	tasklet_kill(&chan->tasklet);
 	list_del(&chan->common.device_node);
 }
@@ -1166,6 +1164,11 @@ static int zynqmp_dma_probe(struct platform_device *pdev)
 	pm_runtime_use_autosuspend(zdev->dev);
 	pm_runtime_enable(zdev->dev);
 	pm_runtime_get_sync(zdev->dev);
+	if (!pm_runtime_enabled(zdev->dev)) {
+		ret = zynqmp_dma_runtime_resume(zdev->dev);
+		if (ret)
+			return ret;
+	}
 
 	ret = zynqmp_dma_chan_probe(zdev, pdev);
 	if (ret) {
@@ -1193,11 +1196,12 @@ static int zynqmp_dma_probe(struct platform_device *pdev)
 
 	return 0;
 
-err_disable_pm:
-	pm_runtime_put_sync_suspend(zdev->dev);
-	pm_runtime_disable(zdev->dev);
 free_chan_resources:
 	zynqmp_dma_chan_remove(zdev->chan);
+err_disable_pm:
+	if (!pm_runtime_enabled(zdev->dev))
+		zynqmp_dma_runtime_suspend(zdev->dev);
+	pm_runtime_disable(zdev->dev);
 	return ret;
 }
 
@@ -1216,6 +1220,8 @@ static int zynqmp_dma_remove(struct platform_device *pdev)
 
 	zynqmp_dma_chan_remove(zdev->chan);
 	pm_runtime_disable(zdev->dev);
+	if (!pm_runtime_enabled(zdev->dev))
+		zynqmp_dma_runtime_suspend(zdev->dev);
 
 	return 0;
 }

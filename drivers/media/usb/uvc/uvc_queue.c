@@ -43,6 +43,11 @@ uvc_queue_to_stream(struct uvc_video_queue *queue)
 	return container_of(queue, struct uvc_streaming, queue);
 }
 
+static inline struct uvc_buffer *uvc_vbuf_to_buffer(struct vb2_v4l2_buffer *buf)
+{
+	return container_of(buf, struct uvc_buffer, buf);
+}
+
 /*
  * Return all queued buffers to videobuf2 in the requested state.
  *
@@ -77,9 +82,14 @@ static int uvc_queue_setup(struct vb2_queue *vq,
 	struct uvc_streaming *stream = uvc_queue_to_stream(queue);
 	unsigned size = stream->ctrl.dwMaxVideoFrameSize;
 
-	/* Make sure the image size is large enough. */
+	/*
+	 * When called with plane sizes, validate them. The driver supports
+	 * single planar formats only, and requires buffers to be large enough
+	 * to store a complete frame.
+	 */
 	if (*nplanes)
-		return sizes[0] < size ? -EINVAL : 0;
+		return *nplanes != 1 || sizes[0] < size ? -EINVAL : 0;
+
 	*nplanes = 1;
 	sizes[0] = size;
 	return 0;
@@ -89,7 +99,7 @@ static int uvc_buffer_prepare(struct vb2_buffer *vb)
 {
 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 	struct uvc_video_queue *queue = vb2_get_drv_priv(vb->vb2_queue);
-	struct uvc_buffer *buf = container_of(vbuf, struct uvc_buffer, buf);
+	struct uvc_buffer *buf = uvc_vbuf_to_buffer(vbuf);
 
 	if (vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT &&
 	    vb2_get_plane_payload(vb, 0) > vb2_plane_size(vb, 0)) {
@@ -116,11 +126,12 @@ static void uvc_buffer_queue(struct vb2_buffer *vb)
 {
 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 	struct uvc_video_queue *queue = vb2_get_drv_priv(vb->vb2_queue);
-	struct uvc_buffer *buf = container_of(vbuf, struct uvc_buffer, buf);
+	struct uvc_buffer *buf = uvc_vbuf_to_buffer(vbuf);
 	unsigned long flags;
 
 	spin_lock_irqsave(&queue->irqlock, flags);
 	if (likely(!(queue->flags & UVC_QUEUE_DISCONNECTED))) {
+		kref_init(&buf->ref);
 		list_add_tail(&buf->queue, &queue->irqqueue);
 	} else {
 		/* If the device is disconnected return the buffer to userspace
@@ -138,7 +149,7 @@ static void uvc_buffer_finish(struct vb2_buffer *vb)
 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 	struct uvc_video_queue *queue = vb2_get_drv_priv(vb->vb2_queue);
 	struct uvc_streaming *stream = uvc_queue_to_stream(queue);
-	struct uvc_buffer *buf = container_of(vbuf, struct uvc_buffer, buf);
+	struct uvc_buffer *buf = uvc_vbuf_to_buffer(vbuf);
 
 	if (vb->state == VB2_BUF_STATE_DONE)
 		uvc_video_clock_update(stream, vbuf, buf);
@@ -168,13 +179,24 @@ static void uvc_stop_streaming(struct vb2_queue *vq)
 {
 	struct uvc_video_queue *queue = vb2_get_drv_priv(vq);
 	struct uvc_streaming *stream = uvc_queue_to_stream(queue);
-	unsigned long flags;
+
+	/* Prevent new buffers coming in. */
+	spin_lock_irq(&queue->irqlock);
+	queue->flags |= UVC_QUEUE_STOPPING;
+	spin_unlock_irq(&queue->irqlock);
+
+	/*
+	 * All pending work should be completed before disabling the stream, as
+	 * all URBs will be free'd during uvc_video_enable(s, 0).
+	 */
+	flush_workqueue(stream->async_wq);
 
 	uvc_video_enable(stream, 0);
 
-	spin_lock_irqsave(&queue->irqlock, flags);
+	spin_lock_irq(&queue->irqlock);
 	uvc_queue_return_buffers(queue, UVC_BUF_STATE_ERROR);
-	spin_unlock_irqrestore(&queue->irqlock, flags);
+	queue->flags &= ~UVC_QUEUE_STOPPING;
+	spin_unlock_irq(&queue->irqlock);
 }
 
 static const struct vb2_ops uvc_queue_qops = {
@@ -389,32 +411,94 @@ void uvc_queue_cancel(struct uvc_video_queue *queue, int disconnect)
 	spin_unlock_irqrestore(&queue->irqlock, flags);
 }
 
+/*
+ * uvc_queue_get_current_buffer: Obtain the current working output buffer
+ *
+ * Buffers may span multiple packets, and even URBs, therefore the active buffer
+ * remains on the queue until the EOF marker.
+ */
+static struct uvc_buffer *
+__uvc_queue_get_current_buffer(struct uvc_video_queue *queue)
+{
+	if (!list_empty(&queue->irqqueue))
+		return list_first_entry(&queue->irqqueue, struct uvc_buffer,
+					queue);
+	else
+		return NULL;
+}
+
+struct uvc_buffer *uvc_queue_get_current_buffer(struct uvc_video_queue *queue)
+{
+	struct uvc_buffer *nextbuf;
+	unsigned long flags;
+
+	spin_lock_irqsave(&queue->irqlock, flags);
+	nextbuf = __uvc_queue_get_current_buffer(queue);
+	spin_unlock_irqrestore(&queue->irqlock, flags);
+
+	return nextbuf;
+}
+
+/*
+ * uvc_queue_requeue: Requeue a buffer on our internal irqqueue
+ *
+ * Reuse a buffer through our internal queue without the need to 'prepare'
+ * The buffer will be returned to userspace through the uvc_buffer_queue call if
+ * the device has been disconnected
+ */
+static void uvc_queue_requeue(struct uvc_video_queue *queue,
+		struct uvc_buffer *buf)
+{
+	buf->error = 0;
+	buf->state = UVC_BUF_STATE_QUEUED;
+	buf->bytesused = 0;
+	vb2_set_plane_payload(&buf->buf.vb2_buf, 0, 0);
+
+	uvc_buffer_queue(&buf->buf.vb2_buf);
+}
+
+static void uvc_queue_buffer_complete(struct kref *ref)
+{
+	struct uvc_buffer *buf = container_of(ref, struct uvc_buffer, ref);
+	struct vb2_buffer *vb = &buf->buf.vb2_buf;
+	struct uvc_video_queue *queue = vb2_get_drv_priv(vb->vb2_queue);
+
+	if ((queue->flags & UVC_QUEUE_DROP_CORRUPTED) && buf->error) {
+		uvc_queue_requeue(queue, buf);
+		return;
+	}
+
+	buf->state = buf->error ? UVC_BUF_STATE_ERROR : UVC_BUF_STATE_DONE;
+	vb2_set_plane_payload(&buf->buf.vb2_buf, 0, buf->bytesused);
+	vb2_buffer_done(&buf->buf.vb2_buf, VB2_BUF_STATE_DONE);
+}
+
+/*
+ * Release a reference on the buffer. Complete the buffer when the last
+ * reference is released
+ */
+void uvc_queue_buffer_release(struct uvc_buffer *buf)
+{
+	kref_put(&buf->ref, uvc_queue_buffer_complete);
+}
+
+/*
+ * Remove this buffer from the queue. Lifetime will persist while async actions
+ * are still running (if any), and uvc_queue_buffer_release will give the buffer
+ * back to VB2 when all users have completed.
+ */
 struct uvc_buffer *uvc_queue_next_buffer(struct uvc_video_queue *queue,
 		struct uvc_buffer *buf)
 {
 	struct uvc_buffer *nextbuf;
 	unsigned long flags;
 
-	if ((queue->flags & UVC_QUEUE_DROP_CORRUPTED) && buf->error) {
-		buf->error = 0;
-		buf->state = UVC_BUF_STATE_QUEUED;
-		buf->bytesused = 0;
-		vb2_set_plane_payload(&buf->buf.vb2_buf, 0, 0);
-		return buf;
-	}
-
 	spin_lock_irqsave(&queue->irqlock, flags);
 	list_del(&buf->queue);
-	if (!list_empty(&queue->irqqueue))
-		nextbuf = list_first_entry(&queue->irqqueue, struct uvc_buffer,
-					   queue);
-	else
-		nextbuf = NULL;
+	nextbuf = __uvc_queue_get_current_buffer(queue);
 	spin_unlock_irqrestore(&queue->irqlock, flags);
 
-	buf->state = buf->error ? VB2_BUF_STATE_ERROR : UVC_BUF_STATE_DONE;
-	vb2_set_plane_payload(&buf->buf.vb2_buf, 0, buf->bytesused);
-	vb2_buffer_done(&buf->buf.vb2_buf, VB2_BUF_STATE_DONE);
+	uvc_queue_buffer_release(buf);
 
 	return nextbuf;
 }

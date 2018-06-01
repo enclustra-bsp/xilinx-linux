@@ -265,6 +265,8 @@ static int xgpio_xlate(struct gpio_chip *gc,
 	struct of_mm_gpio_chip *mm_gc = to_of_mm_gpio_chip(gc);
 	struct xgpio_instance *chip = container_of(mm_gc, struct xgpio_instance,
 						   mmchip);
+	if (gc->of_gpio_n_cells == 3 && flags)
+		*flags = gpiospec->args[2];
 
 	if (gpiospec->args[1] == chip->offset)
 		return gpiospec->args[0];
@@ -376,7 +378,7 @@ static struct irq_chip xgpio_irqchip = {
  * Return:
  * irq number otherwise -EINVAL
  */
-static int xgpio_to_irq(struct gpio_chip *gc, unsigned offset)
+static int xgpio_to_irq(struct gpio_chip *gc, unsigned int offset)
 {
 	struct of_mm_gpio_chip *mm_gc = to_of_mm_gpio_chip(gc);
 	struct xgpio_instance *chip = container_of(mm_gc, struct xgpio_instance,
@@ -387,7 +389,6 @@ static int xgpio_to_irq(struct gpio_chip *gc, unsigned offset)
 
 /**
  * xgpio_irqhandler - Gpio interrupt service routine
- * @irq: gpio irq number
  * @desc: Pointer to interrupt description
  */
 static void xgpio_irqhandler(struct irq_desc *desc)
@@ -433,6 +434,7 @@ static int xgpio_irq_setup(struct device_node *np, struct xgpio_instance *chip)
 	struct resource res;
 
 	int ret = of_irq_to_resource(np, 0, &res);
+
 	if (!ret) {
 		pr_info("GPIO IRQ not connected\n");
 		return 0;
@@ -455,6 +457,7 @@ static int xgpio_irq_setup(struct device_node *np, struct xgpio_instance *chip)
 	 */
 	for (pin_num = 0; pin_num < chip->mmchip.gc.ngpio; pin_num++) {
 		u32 gpio_irq = irq_find_mapping(chip->irq_domain, pin_num);
+
 		irq_set_lockdep_class(gpio_irq, &gpio_lock_class);
 		pr_debug("IRQ Base: %d, Pin %d = IRQ %d\n",
 			chip->irq_base,	pin_num, gpio_irq);
@@ -566,7 +569,7 @@ static int xgpio_remove(struct platform_device *pdev)
 
 /**
  * xgpio_of_probe - Probe method for the GPIO device.
- * @np: pointer to device tree node
+ * @pdev:       platform device instance
  *
  * This function probes the GPIO device in the device tree. It initializes the
  * driver data structure.
@@ -582,6 +585,7 @@ static int xgpio_of_probe(struct platform_device *pdev)
 	int status = 0;
 	const u32 *tree_info;
 	u32 ngpio;
+	u32 cells = 2;
 
 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
 	if (!chip)
@@ -596,6 +600,9 @@ static int xgpio_of_probe(struct platform_device *pdev)
 	/* Update GPIO direction shadow register with default value */
 	of_property_read_u32(np, "xlnx,tri-default", &chip->gpio_dir);
 
+	/* Update cells with gpio-cells value */
+	of_property_read_u32(np, "#gpio-cells", &cells);
+
 	/*
 	 * Check device node and parent device node for device width
 	 * and assume default width of 32
@@ -609,7 +616,7 @@ static int xgpio_of_probe(struct platform_device *pdev)
 	chip->mmchip.gc.parent = &pdev->dev;
 	chip->mmchip.gc.owner = THIS_MODULE;
 	chip->mmchip.gc.of_xlate = xgpio_xlate;
-	chip->mmchip.gc.of_gpio_n_cells = 2;
+	chip->mmchip.gc.of_gpio_n_cells = cells;
 	chip->mmchip.gc.direction_input = xgpio_dir_in;
 	chip->mmchip.gc.direction_output = xgpio_dir_out;
 	chip->mmchip.gc.get = xgpio_get;
@@ -622,9 +629,10 @@ static int xgpio_of_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, chip);
 
-	chip->clk = devm_clk_get(&pdev->dev, "axi_clk");
+	chip->clk = devm_clk_get(&pdev->dev, "s_axi_aclk");
 	if (IS_ERR(chip->clk)) {
-		if (PTR_ERR(chip->clk) != -ENOENT) {
+		if ((PTR_ERR(chip->clk) != -ENOENT) ||
+				(PTR_ERR(chip->clk) != -EPROBE_DEFER)) {
 			dev_err(&pdev->dev, "Input clock not found\n");
 			return PTR_ERR(chip->clk);
 		}
@@ -636,9 +644,9 @@ static int xgpio_of_probe(struct platform_device *pdev)
 		chip->clk = NULL;
 	}
 
-	status = clk_prepare(chip->clk);
+	status = clk_prepare_enable(chip->clk);
 	if (status < 0) {
-		dev_err(&pdev->dev, "Failed to preapre clk\n");
+		dev_err(&pdev->dev, "Failed to prepare clk\n");
 		return status;
 	}
 
@@ -650,8 +658,8 @@ static int xgpio_of_probe(struct platform_device *pdev)
 	/* Call the OF gpio helper to setup and register the GPIO device */
 	status = of_mm_gpiochip_add(np, &chip->mmchip);
 	if (status) {
-		pr_err("%s: error in probe function with status %d\n",
-		       np->full_name, status);
+		pr_err("%pOF: error in probe function with status %d\n",
+		       np, status);
 		goto err_pm_put;
 	}
 
@@ -697,7 +705,7 @@ static int xgpio_of_probe(struct platform_device *pdev)
 		chip->mmchip.gc.parent = &pdev->dev;
 		chip->mmchip.gc.owner = THIS_MODULE;
 		chip->mmchip.gc.of_xlate = xgpio_xlate;
-		chip->mmchip.gc.of_gpio_n_cells = 2;
+		chip->mmchip.gc.of_gpio_n_cells = cells;
 		chip->mmchip.gc.direction_input = xgpio_dir_in;
 		chip->mmchip.gc.direction_output = xgpio_dir_out;
 		chip->mmchip.gc.get = xgpio_get;
@@ -733,7 +741,7 @@ err_pm_put:
 	pm_runtime_put(&pdev->dev);
 err_unprepare_clk:
 	pm_runtime_disable(&pdev->dev);
-	clk_unprepare(chip->clk);
+	clk_disable_unprepare(chip->clk);
 	return status;
 }
 

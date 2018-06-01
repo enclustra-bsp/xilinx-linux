@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ WITH Linux-syscall-note */
 /*
  * Copyright © 1999-2010 David Woodhouse <dwmw2@infradead.org> et al.
  *
@@ -274,19 +275,6 @@ enum mtd_file_modes {
 	MTD_FILE_MODE_OTP_FACTORY = MTD_OTP_FACTORY,
 	MTD_FILE_MODE_OTP_USER = MTD_OTP_USER,
 	MTD_FILE_MODE_RAW,
-};
-
-/*
- * MTD locking states - return codes for ioctl(MEMISLOCKED)
- *
- * @MTD_IS_UNLOCKED:		Specified region is completely unlocked
- * @MTD_IS_LOCKED:		Specified region is completely locked
- * @MTD_IS_PARTIALLY_LOCKED:	Specified region is partially locked
- */
-enum mtd_locking_states {
-	MTD_IS_UNLOCKED,
-	MTD_IS_LOCKED,
-	MTD_IS_PARTIALLY_LOCKED,
 };
 
 static inline int mtd_type_is_nand_user(const struct mtd_info_user *mtd)

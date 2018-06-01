@@ -30,7 +30,6 @@
 
 #include <linux/ti_wilink_st.h>
 #include <linux/module.h>
-#include <linux/of.h>
 
 /* Bluetooth Driver Version */
 #define VERSION               "1.0"
@@ -94,8 +93,7 @@ static void st_reg_completion_cb(void *priv_data, int data)
 	complete(&lhst->wait_reg_completion);
 }
 
-/* Called by Shared Transport layer when receive data is
- * available */
+/* Called by Shared Transport layer when receive data is available */
 static long st_receive(void *priv_data, struct sk_buff *skb)
 {
 	struct ti_st *lhst = priv_data;
@@ -199,7 +197,8 @@ static int ti_st_open(struct hci_dev *hdev)
 		}
 
 		/* Is ST registration callback
-		 * called with ERROR status? */
+		 * called with ERROR status?
+		 */
 		if (hst->reg_status != 0) {
 			BT_ERR("ST registration completed with invalid "
 					"status %d", hst->reg_status);
@@ -263,7 +262,6 @@ static int ti_st_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
 	pkt_type = hci_skb_pkt_type(skb);
 	len = hst->st_write(skb);
 	if (len < 0) {
-		kfree_skb(skb);
 		BT_ERR("ST write failed (%ld)", len);
 		/* Try Again, would only fail if UART has gone bad */
 		return -EAGAIN;
@@ -276,17 +274,9 @@ static int ti_st_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
 	return 0;
 }
 
-static const struct of_device_id btwilink_of_match[] = {
-{
-    .compatible = "btwilink",
-  },
-  {}
-};
-MODULE_DEVICE_TABLE(of, btwilink_of_match);
-
 static int bt_ti_probe(struct platform_device *pdev)
 {
-	static struct ti_st *hst;
+	struct ti_st *hst;
 	struct hci_dev *hdev;
 	int err;
 
@@ -347,7 +337,6 @@ static struct platform_driver btwilink_driver = {
 	.remove = bt_ti_remove,
 	.driver = {
 		.name = "btwilink",
-		.of_match_table = of_match_ptr(btwilink_of_match),
 	},
 };
 

@@ -73,6 +73,7 @@ static const char * const rproc_state_string[] = {
 	[RPROC_SUSPENDED]	= "suspended",
 	[RPROC_RUNNING]		= "running",
 	[RPROC_CRASHED]		= "crashed",
+	[RPROC_DELETED]		= "deleted",
 	[RPROC_RUNNING_INDEPENDENT] = "running_independent",
 	[RPROC_LAST]		= "invalid",
 };
@@ -98,7 +99,7 @@ static ssize_t state_store(struct device *dev,
 
 	if (sysfs_streq(buf, "start")) {
 		if (rproc->state == RPROC_RUNNING ||
-			rproc->state == RPROC_RUNNING_INDEPENDENT)
+		    rproc->state == RPROC_RUNNING_INDEPENDENT)
 			return -EBUSY;
 
 		ret = rproc_boot(rproc);
@@ -106,7 +107,7 @@ static ssize_t state_store(struct device *dev,
 			dev_err(&rproc->dev, "Boot failed: %d\n", ret);
 	} else if (sysfs_streq(buf, "stop")) {
 		if (rproc->state != RPROC_RUNNING &&
-			rproc->state != RPROC_RUNNING_INDEPENDENT)
+		    rproc->state != RPROC_RUNNING_INDEPENDENT)
 			return -EINVAL;
 
 		rproc_shutdown(rproc);

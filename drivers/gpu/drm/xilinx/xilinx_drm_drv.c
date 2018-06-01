@@ -20,7 +20,6 @@
 #include <drm/drm_gem_cma_helper.h>
 
 #include <linux/component.h>
-#include <linux/console.h>
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/of_graph.h>
@@ -72,7 +71,7 @@ struct xilinx_video_format_desc {
 	unsigned int depth;
 	unsigned int bpp;
 	unsigned int xilinx_format;
-	uint32_t drm_format;
+	u32 drm_format;
 };
 
 static const struct xilinx_video_format_desc xilinx_video_formats[] = {
@@ -111,7 +110,7 @@ static const struct xilinx_video_format_desc xilinx_video_formats[] = {
  *
  * Return: true if the format is supported, or false
  */
-bool xilinx_drm_check_format(struct drm_device *drm, uint32_t fourcc)
+bool xilinx_drm_check_format(struct drm_device *drm, u32 fourcc)
 {
 	struct xilinx_drm_private *private = drm->dev_private;
 
@@ -126,7 +125,7 @@ bool xilinx_drm_check_format(struct drm_device *drm, uint32_t fourcc)
  *
  * Return: the corresponding DRM_FORMAT_XXX
  */
-uint32_t xilinx_drm_get_format(struct drm_device *drm)
+u32 xilinx_drm_get_format(struct drm_device *drm)
 {
 	struct xilinx_drm_private *private = drm->dev_private;
 
@@ -146,14 +145,6 @@ unsigned int xilinx_drm_get_align(struct drm_device *drm)
 	struct xilinx_drm_private *private = drm->dev_private;
 
 	return xilinx_drm_crtc_get_align(private->crtc);
-}
-
-void xilinx_drm_set_config(struct drm_device *drm, struct drm_mode_set *set)
-{
-	struct xilinx_drm_private *private = drm->dev_private;
-
-	if (private && private->fb)
-		xilinx_drm_fb_set_config(private->fb, set);
 }
 
 /* poll changed handler */
@@ -203,7 +194,7 @@ static void xilinx_drm_mode_config_init(struct drm_device *drm)
 }
 
 /* convert xilinx format to drm format by code */
-int xilinx_drm_format_by_code(unsigned int xilinx_format, uint32_t *drm_format)
+int xilinx_drm_format_by_code(unsigned int xilinx_format, u32 *drm_format)
 {
 	const struct xilinx_video_format_desc *format;
 	unsigned int i;
@@ -222,7 +213,7 @@ int xilinx_drm_format_by_code(unsigned int xilinx_format, uint32_t *drm_format)
 }
 
 /* convert xilinx format to drm format by name */
-int xilinx_drm_format_by_name(const char *name, uint32_t *drm_format)
+int xilinx_drm_format_by_name(const char *name, u32 *drm_format)
 {
 	const struct xilinx_video_format_desc *format;
 	unsigned int i;
@@ -241,7 +232,7 @@ int xilinx_drm_format_by_name(const char *name, uint32_t *drm_format)
 }
 
 /* get bpp of given format */
-unsigned int xilinx_drm_format_bpp(uint32_t drm_format)
+unsigned int xilinx_drm_format_bpp(u32 drm_format)
 {
 	const struct xilinx_video_format_desc *format;
 	unsigned int i;
@@ -256,7 +247,7 @@ unsigned int xilinx_drm_format_bpp(uint32_t drm_format)
 }
 
 /* get color depth of given format */
-unsigned int xilinx_drm_format_depth(uint32_t drm_format)
+unsigned int xilinx_drm_format_depth(u32 drm_format)
 {
 	const struct xilinx_video_format_desc *format;
 	unsigned int i;
@@ -295,21 +286,169 @@ static int compare_of(struct device *dev, void *data)
 	return dev->of_node == np;
 }
 
-/* load xilinx drm */
-static int xilinx_drm_load(struct drm_device *drm, unsigned long flags)
+static int xilinx_drm_open(struct drm_device *dev, struct drm_file *file)
+{
+	struct xilinx_drm_private *private = dev->dev_private;
+
+	/* This is a hack way to allow the root user to run as a master */
+	if (!(drm_is_primary_client(file) && !dev->master) &&
+	    !file->is_master && capable(CAP_SYS_ADMIN)) {
+		file->is_master = 1;
+		private->is_master = true;
+	}
+
+	return 0;
+}
+
+static int xilinx_drm_release(struct inode *inode, struct file *filp)
+{
+	struct drm_file *file = filp->private_data;
+	struct drm_minor *minor = file->minor;
+	struct drm_device *drm = minor->dev;
+	struct xilinx_drm_private *private = drm->dev_private;
+
+	if (private->is_master) {
+		private->is_master = false;
+		file->is_master = 0;
+	}
+
+	return drm_release(inode, filp);
+}
+
+/* restore the default mode when xilinx drm is released */
+static void xilinx_drm_lastclose(struct drm_device *drm)
+{
+	struct xilinx_drm_private *private = drm->dev_private;
+
+	xilinx_drm_crtc_restore(private->crtc);
+
+	xilinx_drm_fb_restore_mode(private->fb);
+}
+
+static const struct file_operations xilinx_drm_fops = {
+	.owner		= THIS_MODULE,
+	.open		= drm_open,
+	.release	= xilinx_drm_release,
+	.unlocked_ioctl	= drm_ioctl,
+	.mmap		= drm_gem_cma_mmap,
+	.poll		= drm_poll,
+	.read		= drm_read,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= drm_compat_ioctl,
+#endif
+	.llseek		= noop_llseek,
+};
+
+static struct drm_driver xilinx_drm_driver = {
+	.driver_features		= DRIVER_MODESET | DRIVER_GEM |
+					  DRIVER_PRIME | DRIVER_LEGACY,
+	.open				= xilinx_drm_open,
+	.lastclose			= xilinx_drm_lastclose,
+
+	.enable_vblank			= xilinx_drm_enable_vblank,
+	.disable_vblank			= xilinx_drm_disable_vblank,
+
+	.prime_handle_to_fd		= drm_gem_prime_handle_to_fd,
+	.prime_fd_to_handle		= drm_gem_prime_fd_to_handle,
+	.gem_prime_export		= drm_gem_prime_export,
+	.gem_prime_import		= drm_gem_prime_import,
+	.gem_prime_get_sg_table		= drm_gem_cma_prime_get_sg_table,
+	.gem_prime_import_sg_table	= drm_gem_cma_prime_import_sg_table,
+	.gem_prime_vmap			= drm_gem_cma_prime_vmap,
+	.gem_prime_vunmap		= drm_gem_cma_prime_vunmap,
+	.gem_prime_mmap			= drm_gem_cma_prime_mmap,
+	.gem_free_object		= drm_gem_cma_free_object,
+	.gem_vm_ops			= &drm_gem_cma_vm_ops,
+	.dumb_create			= xilinx_drm_gem_cma_dumb_create,
+
+	.fops				= &xilinx_drm_fops,
+
+	.name				= DRIVER_NAME,
+	.desc				= DRIVER_DESC,
+	.date				= DRIVER_DATE,
+	.major				= DRIVER_MAJOR,
+	.minor				= DRIVER_MINOR,
+};
+
+#if defined(CONFIG_PM_SLEEP)
+/* suspend xilinx drm */
+static int xilinx_drm_pm_suspend(struct device *dev)
+{
+	struct xilinx_drm_private *private = dev_get_drvdata(dev);
+	struct drm_device *drm = private->drm;
+	struct drm_connector *connector;
+
+	drm_kms_helper_poll_disable(drm);
+	drm_modeset_lock_all(drm);
+	list_for_each_entry(connector, &drm->mode_config.connector_list, head) {
+		int old_dpms = connector->dpms;
+
+		if (connector->funcs->dpms)
+			connector->funcs->dpms(connector,
+					       DRM_MODE_DPMS_SUSPEND);
+
+		connector->dpms = old_dpms;
+	}
+	drm_modeset_unlock_all(drm);
+
+	return 0;
+}
+
+/* resume xilinx drm */
+static int xilinx_drm_pm_resume(struct device *dev)
+{
+	struct xilinx_drm_private *private = dev_get_drvdata(dev);
+	struct drm_device *drm = private->drm;
+	struct drm_connector *connector;
+
+	drm_modeset_lock_all(drm);
+	list_for_each_entry(connector, &drm->mode_config.connector_list, head) {
+		if (connector->funcs->dpms) {
+			int dpms = connector->dpms;
+
+			connector->dpms = DRM_MODE_DPMS_OFF;
+			connector->funcs->dpms(connector, dpms);
+		}
+	}
+	drm_modeset_unlock_all(drm);
+
+	drm_helper_resume_force_mode(drm);
+
+	drm_modeset_lock_all(drm);
+	drm_kms_helper_poll_enable(drm);
+	drm_modeset_unlock_all(drm);
+
+	return 0;
+}
+#endif
+
+static const struct dev_pm_ops xilinx_drm_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(xilinx_drm_pm_suspend, xilinx_drm_pm_resume)
+};
+
+/* init xilinx drm platform */
+static int xilinx_drm_platform_probe(struct platform_device *pdev)
 {
 	struct xilinx_drm_private *private;
+	struct drm_device *drm;
 	struct drm_encoder *encoder;
 	struct drm_connector *connector;
+	const struct drm_format_info *info;
 	struct device_node *encoder_node, *ep = NULL, *remote;
-	struct platform_device *pdev = drm->platformdev;
 	struct component_match *match = NULL;
-	unsigned int bpp, align, i = 0;
+	unsigned int align, i = 0;
 	int ret;
+	u32 format;
+
+	drm = drm_dev_alloc(&xilinx_drm_driver, &pdev->dev);
+	if (IS_ERR(drm))
+		return PTR_ERR(drm);
 
 	private = devm_kzalloc(drm->dev, sizeof(*private), GFP_KERNEL);
-	if (!private)
-		return -ENOMEM;
+	if (!private) {
+		ret = -ENOMEM;
+		goto err_drm;
+	}
 
 	drm_mode_config_init(drm);
 
@@ -318,7 +457,7 @@ static int xilinx_drm_load(struct drm_device *drm, unsigned long flags)
 	if (IS_ERR(private->crtc)) {
 		DRM_DEBUG_DRIVER("failed to create xilinx crtc\n");
 		ret = PTR_ERR(private->crtc);
-		goto err_out;
+		goto err_config;
 	}
 
 	while ((encoder_node = of_parse_phandle(drm->dev->of_node,
@@ -328,14 +467,14 @@ static int xilinx_drm_load(struct drm_device *drm, unsigned long flags)
 		if (IS_ERR(encoder)) {
 			DRM_DEBUG_DRIVER("failed to create xilinx encoder\n");
 			ret = PTR_ERR(encoder);
-			goto err_out;
+			goto err_config;
 		}
 
 		connector = xilinx_drm_connector_create(drm, encoder, i);
 		if (IS_ERR(connector)) {
 			DRM_DEBUG_DRIVER("failed to create xilinx connector\n");
 			ret = PTR_ERR(connector);
-			goto err_out;
+			goto err_config;
 		}
 
 		i++;
@@ -376,15 +515,18 @@ static int xilinx_drm_load(struct drm_device *drm, unsigned long flags)
 	private->drm = drm;
 	xilinx_drm_mode_config_init(drm);
 
-	/* initialize xilinx framebuffer */
-	bpp = xilinx_drm_format_bpp(xilinx_drm_crtc_get_format(private->crtc));
-	align = xilinx_drm_crtc_get_align(private->crtc);
-	private->fb = xilinx_drm_fb_init(drm, bpp, 1, 1, align,
-					 xilinx_drm_fbdev_vres);
-	if (IS_ERR(private->fb)) {
-		DRM_ERROR("failed to initialize drm cma fb\n");
-		ret = PTR_ERR(private->fb);
-		goto err_fb;
+	format = xilinx_drm_crtc_get_format(private->crtc);
+	info = drm_format_info(format);
+	if (info && info->depth && info->cpp[0]) {
+		align = xilinx_drm_crtc_get_align(private->crtc);
+		private->fb = xilinx_drm_fb_init(drm, info->cpp[0] * 8, 1,
+						 align, xilinx_drm_fbdev_vres);
+		if (IS_ERR(private->fb)) {
+			DRM_ERROR("failed to initialize drm fb\n");
+			private->fb = NULL;
+		}
+	} else {
+		dev_info(&pdev->dev, "fbdev is not initialized\n");
 	}
 
 	drm_kms_helper_poll_init(drm);
@@ -397,199 +539,45 @@ static int xilinx_drm_load(struct drm_device *drm, unsigned long flags)
 		ret = component_master_add_with_match(drm->dev,
 						      &xilinx_drm_ops, match);
 		if (ret)
-			goto err_fb;
+			goto err_master;
 	}
+
+	ret = dma_set_coherent_mask(&pdev->dev,
+				    DMA_BIT_MASK(sizeof(dma_addr_t) * 8));
+	if (ret) {
+		dev_info(&pdev->dev, "failed to set coherent mask (%zu)\n",
+			 sizeof(dma_addr_t));
+	}
+
+	ret = drm_dev_register(drm, 0);
+	if (ret < 0)
+		goto err_master;
 
 	return 0;
 
-err_fb:
-	drm_vblank_cleanup(drm);
 err_master:
 	component_master_del(drm->dev, &xilinx_drm_ops);
-err_out:
+err_config:
 	drm_mode_config_cleanup(drm);
 	if (ret == -EPROBE_DEFER)
 		DRM_INFO("load() is defered & will be called again\n");
+err_drm:
+	drm_dev_unref(drm);
 	return ret;
-}
-
-/* unload xilinx drm */
-static int xilinx_drm_unload(struct drm_device *drm)
-{
-	struct xilinx_drm_private *private = drm->dev_private;
-
-	drm_vblank_cleanup(drm);
-	component_master_del(drm->dev, &xilinx_drm_ops);
-	drm_kms_helper_poll_fini(drm);
-	xilinx_drm_fb_fini(private->fb);
-	drm_mode_config_cleanup(drm);
-
-	return 0;
-}
-
-int xilinx_drm_open(struct drm_device *dev, struct drm_file *file)
-{
-	struct xilinx_drm_private *private = dev->dev_private;
-
-	if (!(drm_is_primary_client(file) && !dev->master) &&
-			capable(CAP_SYS_ADMIN)) {
-		file->is_master = 1;
-		private->is_master = true;
-	}
-
-	return 0;
-}
-
-/* preclose */
-static void xilinx_drm_preclose(struct drm_device *drm, struct drm_file *file)
-{
-	struct xilinx_drm_private *private = drm->dev_private;
-
-	/* cancel pending page flip request */
-	xilinx_drm_crtc_cancel_page_flip(private->crtc, file);
-
-	if (private->is_master) {
-		private->is_master = false;
-		file->is_master = 0;
-	}
-}
-
-/* restore the default mode when xilinx drm is released */
-static void xilinx_drm_lastclose(struct drm_device *drm)
-{
-	struct xilinx_drm_private *private = drm->dev_private;
-
-	xilinx_drm_crtc_restore(private->crtc);
-
-	xilinx_drm_fb_restore_mode(private->fb);
-}
-
-static const struct file_operations xilinx_drm_fops = {
-	.owner		= THIS_MODULE,
-	.open		= drm_open,
-	.release	= drm_release,
-	.unlocked_ioctl	= drm_ioctl,
-	.mmap		= drm_gem_cma_mmap,
-	.poll		= drm_poll,
-	.read		= drm_read,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl	= drm_compat_ioctl,
-#endif
-	.llseek		= noop_llseek,
-};
-
-static struct drm_driver xilinx_drm_driver = {
-	.driver_features		= DRIVER_MODESET | DRIVER_GEM |
-					  DRIVER_PRIME,
-	.load				= xilinx_drm_load,
-	.unload				= xilinx_drm_unload,
-	.open				= xilinx_drm_open,
-	.preclose			= xilinx_drm_preclose,
-	.lastclose			= xilinx_drm_lastclose,
-
-	.get_vblank_counter		= drm_vblank_no_hw_counter,
-	.enable_vblank			= xilinx_drm_enable_vblank,
-	.disable_vblank			= xilinx_drm_disable_vblank,
-
-	.prime_handle_to_fd		= drm_gem_prime_handle_to_fd,
-	.prime_fd_to_handle		= drm_gem_prime_fd_to_handle,
-	.gem_prime_export		= drm_gem_prime_export,
-	.gem_prime_import		= drm_gem_prime_import,
-	.gem_prime_get_sg_table		= drm_gem_cma_prime_get_sg_table,
-	.gem_prime_import_sg_table	= drm_gem_cma_prime_import_sg_table,
-	.gem_prime_vmap			= drm_gem_cma_prime_vmap,
-	.gem_prime_vunmap		= drm_gem_cma_prime_vunmap,
-	.gem_prime_mmap			= drm_gem_cma_prime_mmap,
-	.gem_free_object		= drm_gem_cma_free_object,
-	.gem_vm_ops			= &drm_gem_cma_vm_ops,
-	.dumb_create			= xilinx_drm_gem_cma_dumb_create,
-	.dumb_map_offset		= drm_gem_cma_dumb_map_offset,
-	.dumb_destroy			= drm_gem_dumb_destroy,
-
-	.fops				= &xilinx_drm_fops,
-
-	.name				= DRIVER_NAME,
-	.desc				= DRIVER_DESC,
-	.date				= DRIVER_DATE,
-	.major				= DRIVER_MAJOR,
-	.minor				= DRIVER_MINOR,
-};
-
-#if defined(CONFIG_PM_SLEEP)
-/* suspend xilinx drm */
-static int xilinx_drm_pm_suspend(struct device *dev)
-{
-	struct xilinx_drm_private *private = dev_get_drvdata(dev);
-	struct drm_device *drm = private->drm;
-	struct drm_connector *connector;
-
-	drm_kms_helper_poll_disable(drm);
-
-	if (!console_suspend_enabled)
-		return 0;
-
-	drm_modeset_lock_all(drm);
-	list_for_each_entry(connector, &drm->mode_config.connector_list, head) {
-		int old_dpms = connector->dpms;
-
-		if (connector->funcs->dpms)
-			connector->funcs->dpms(connector,
-					       DRM_MODE_DPMS_SUSPEND);
-
-		connector->dpms = old_dpms;
-	}
-	drm_modeset_unlock_all(drm);
-
-	return 0;
-}
-
-/* resume xilinx drm */
-static int xilinx_drm_pm_resume(struct device *dev)
-{
-	struct xilinx_drm_private *private = dev_get_drvdata(dev);
-	struct drm_device *drm = private->drm;
-	struct drm_connector *connector;
-
-	if (!console_suspend_enabled)
-		return 0;
-
-	drm_modeset_lock_all(drm);
-	list_for_each_entry(connector, &drm->mode_config.connector_list, head) {
-		if (connector->funcs->dpms) {
-			int dpms = connector->dpms;
-
-			connector->dpms = DRM_MODE_DPMS_OFF;
-			connector->funcs->dpms(connector, dpms);
-		}
-	}
-	drm_modeset_unlock_all(drm);
-
-	drm_helper_resume_force_mode(drm);
-
-	drm_modeset_lock_all(drm);
-	drm_kms_helper_poll_enable_locked(drm);
-	drm_modeset_unlock_all(drm);
-
-	return 0;
-}
-#endif
-
-static const struct dev_pm_ops xilinx_drm_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(xilinx_drm_pm_suspend, xilinx_drm_pm_resume)
-};
-
-/* init xilinx drm platform */
-static int xilinx_drm_platform_probe(struct platform_device *pdev)
-{
-	return drm_platform_init(&xilinx_drm_driver, pdev);
 }
 
 /* exit xilinx drm platform */
 static int xilinx_drm_platform_remove(struct platform_device *pdev)
 {
 	struct xilinx_drm_private *private = platform_get_drvdata(pdev);
+	struct drm_device *drm = private->drm;
 
-	drm_put_dev(private->drm);
+	component_master_del(drm->dev, &xilinx_drm_ops);
+	drm_kms_helper_poll_fini(drm);
+	xilinx_drm_fb_fini(private->fb);
+	drm_mode_config_cleanup(drm);
+	drm->dev_private = NULL;
+	drm_dev_unref(private->drm);
 
 	return 0;
 }
