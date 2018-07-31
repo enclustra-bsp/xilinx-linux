@@ -37,28 +37,43 @@ struct macb_mdio_data {
 #define macb_mdio_reg_readl(bp, offset)	readl_relaxed(bp->regs + offset)
 #define macb_mdio_readl(bp, reg)	macb_mdio_reg_readl(bp, MACB_##reg)
 
-#define MACB_MDIO_TIMEOUT	1000
-
 static int macb_mdio_read(struct mii_bus *bus, int mii_id, int regnum)
 {
 	struct macb_mdio_data *bp = bus->priv;
-	unsigned int timeout = MACB_MDIO_TIMEOUT;
 	int value;
+	ulong timeout;
 
-	macb_mdio_writel(bp, MAN, (MACB_BF(SOF, MACB_MAN_SOF) |
-				   MACB_BF(RW, MACB_MAN_READ) |
-				   MACB_BF(PHYA, mii_id) |
-				   MACB_BF(REGA, regnum) |
-				   MACB_BF(CODE, MACB_MAN_CODE)));
-
+	timeout = jiffies + msecs_to_jiffies(1000);
 	/* wait for end of transfer */
-	while (!MACB_BFEXT(IDLE, macb_mdio_readl(bp, NSR)) && timeout) {
+	do {
+		if (MACB_BFEXT(IDLE, macb_mdio_readl(bp, NSR)))
+			break;
+
 		cpu_relax();
-		timeout--;
+	} while (!time_after_eq(jiffies, timeout));
+
+	if (time_after_eq(jiffies, timeout)) {
+		return -ETIMEDOUT;
 	}
 
-	if (!timeout)
+	macb_mdio_writel(bp, MAN, (MACB_BF(SOF, MACB_MAN_SOF)
+			      | MACB_BF(RW, MACB_MAN_READ)
+			      | MACB_BF(PHYA, mii_id)
+			      | MACB_BF(REGA, regnum)
+			      | MACB_BF(CODE, MACB_MAN_CODE)));
+
+	timeout = jiffies + msecs_to_jiffies(1000);
+	/* wait for end of transfer */
+	do {
+		if (MACB_BFEXT(IDLE, macb_mdio_readl(bp, NSR)))
+			break;
+
+		cpu_relax();
+	} while (!time_after_eq(jiffies, timeout));
+
+	if (time_after_eq(jiffies, timeout)) {
 		return -ETIMEDOUT;
+	}
 
 	value = MACB_BFEXT(DATA, macb_mdio_readl(bp, MAN));
 
@@ -69,23 +84,40 @@ static int macb_mdio_write(struct mii_bus *bus, int mii_id, int regnum,
 			   u16 value)
 {
 	struct macb_mdio_data *bp = bus->priv;
-	unsigned int timeout = MACB_MDIO_TIMEOUT;
+	ulong timeout;
 
-	macb_mdio_writel(bp, MAN, (MACB_BF(SOF, MACB_MAN_SOF) |
-				   MACB_BF(RW, MACB_MAN_WRITE) |
-				   MACB_BF(PHYA, mii_id) |
-				   MACB_BF(REGA, regnum) |
-				   MACB_BF(CODE, MACB_MAN_CODE) |
-				   MACB_BF(DATA, value)));
-
+	timeout = jiffies + msecs_to_jiffies(1000);
 	/* wait for end of transfer */
-	while (!MACB_BFEXT(IDLE, macb_mdio_readl(bp, NSR)) && timeout) {
+	do {
+		if (MACB_BFEXT(IDLE, macb_mdio_readl(bp, NSR)))
+			break;
+
 		cpu_relax();
-		timeout--;
+	} while (!time_after_eq(jiffies, timeout));
+
+	if (time_after_eq(jiffies, timeout)) {
+		return -ETIMEDOUT;
 	}
 
-	if (!timeout)
+	macb_mdio_writel(bp, MAN, (MACB_BF(SOF, MACB_MAN_SOF)
+			      | MACB_BF(RW, MACB_MAN_WRITE)
+			      | MACB_BF(PHYA, mii_id)
+			      | MACB_BF(REGA, regnum)
+			      | MACB_BF(CODE, MACB_MAN_CODE)
+			      | MACB_BF(DATA, value)));
+
+	timeout = jiffies + msecs_to_jiffies(1000);
+	/* wait for end of transfer */
+	do {
+		if (MACB_BFEXT(IDLE, macb_mdio_readl(bp, NSR)))
+			break;
+
+		cpu_relax();
+	} while (!time_after_eq(jiffies, timeout));
+
+	if (time_after_eq(jiffies, timeout)) {
 		return -ETIMEDOUT;
+	}
 
 	return 0;
 }
