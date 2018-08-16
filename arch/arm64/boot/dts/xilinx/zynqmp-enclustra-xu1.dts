@@ -194,7 +194,7 @@
 };
 
 &sata {
-	status = "okay";
+	status = "disabled";
 	/* SATA OOB timing settings */
 	ceva,p0-cominit-params = /bits/ 8 <0x18 0x40 0x18 0x28>;
 	ceva,p0-comwake-params = /bits/ 8 <0x06 0x14 0x08 0x0E>;
@@ -256,7 +256,7 @@
 	dr_mode = "host";
 	snps,usb3_lpm_capable;
 	phy-names = "usb3-phy";
-	phys = <&lane2 PHY_TYPE_USB3 0 2 52000000>;
+	phys = <&lane2 PHY_TYPE_USB3 0 2 100000000>;
 	maximum-speed = "super-speed";
 };
 
