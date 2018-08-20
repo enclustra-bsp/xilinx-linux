@@ -20,7 +20,7 @@
 #include <dt-bindings/phy/phy.h>
 
 / {
-	model = "Enlustra XU1 SOM";
+	model = "Enclustra XU1 SOM";
 	compatible = "xlnx,zynqmp";
 
 	aliases {
