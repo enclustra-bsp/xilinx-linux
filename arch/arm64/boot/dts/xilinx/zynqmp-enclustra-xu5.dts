@@ -25,6 +25,7 @@
 
 	aliases {
 		ethernet0 = &gem0;
+		ethernet1 = &gem1;
 		gpio0 = &gpio;
 		i2c0 = &i2c0;
 		mmc0 = &sdhci1;
@@ -48,14 +49,14 @@
 		reg = <0x0 0x0 0x0 0x80000000>;
 	};
 
-	mdio {
+	mdio0 {
 		compatible = "cdns,macb-mdio";
 		reg = <0x0 0xff0b0000 0x0 0x1000>;
 		clocks =  <&clk 45>, <&clk 45>, <&clk 49>;
 		clock-names = "pclk", "tx_clk", "hclk";
 		#address-cells = <1>;
 		#size-cells = <0>;
-		phy3: ethernet-phy@3 {
+		phy0: ethernet-phy@3 {
 			reg = <3>;
 
 			txc-skew-ps = <1800>;
@@ -73,6 +74,35 @@
 			rxd1-skew-ps = <420>;
 			rxd2-skew-ps = <420>;
 			rxd3-skew-ps = <420>;
+		};
+	};
+
+
+	mdio1 {
+		compatible = "cdns,macb-mdio";
+		reg = <0x0 0xff0c0000 0x0 0x1000>;
+		clocks =  <&clk 45>, <&clk 45>, <&clk 49>;
+		clock-names = "pclk", "tx_clk", "hclk";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		phy1: ethernet-phy@3 {
+			reg = <3>;
+
+			txc-skew-ps = <1800>;
+			txen-skew-ps = <420>;
+
+			txd0-skew-ps = <420>;
+			txd1-skew-ps = <420>;
+			txd2-skew-ps = <420>;
+			txd3-skew-ps = <420>;
+
+			rxc-skew-ps = <1860>;
+			rxdv-skew-ps = <420>;
+
+			rxd0-skew-ps = <0>;
+			rxd1-skew-ps = <0>;
+			rxd2-skew-ps = <0>;
+			rxd3-skew-ps = <0>;
 		};
 	};
 };
@@ -134,10 +164,21 @@
 &gem0 {
 	status = "okay";
 	local-mac-address = [00 0a 35 00 02 90];
+	phy = <&phy0>;
 	phy-mode = "rgmii-id";
-	phy-handle = <&phy3>;
+	phy-handle = <&phy0>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_gem0_default>;
+	rx-watermark = /bits/ 16 <0x44>;
+};
+
+&gem1 {
+	status = "okay";
+	local-mac-address = [00 0a 35 00 02 91];
+	phy = <&phy1>;
+	phy-mode = "gmii-id";
+	phy-handle = <&phy1>;
+	pinctrl-names = "default";
 	rx-watermark = /bits/ 16 <0x44>;
 };
 
