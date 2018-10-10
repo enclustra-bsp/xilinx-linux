@@ -169,7 +169,6 @@
 	phy-handle = <&phy0>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_gem0_default>;
-	rx-watermark = /bits/ 16 <0x44>;
 };
 
 &gem1 {
@@ -179,7 +178,6 @@
 	phy-mode = "gmii-id";
 	phy-handle = <&phy1>;
 	pinctrl-names = "default";
-	rx-watermark = /bits/ 16 <0x44>;
 };
 
 &gpio {

@@ -149,7 +149,6 @@
 	phy-handle = <&phy3>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_gem0_default>;
-	rx-watermark = /bits/ 16 <0x44>;
 };
 
 &gem3 {
@@ -159,7 +158,6 @@
 	phy-handle = <&phy7>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_gem3_default>;
-	rx-watermark = /bits/ 16 <0x44>;
 };
 
 &gpio {
