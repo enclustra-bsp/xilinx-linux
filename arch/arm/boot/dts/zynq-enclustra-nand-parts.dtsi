@@ -29,8 +29,12 @@
 		label = "nand-bootscript";
 		reg = <0x600000 0x100000>;
 	};
+	partition@ubi-env {
+		label = "ubi-env";
+		reg = <0x700000 0xb00000>;
+	};
 	partition@nand-rootfs {
 		label = "nand-rootfs";
-		reg = <0x700000 0x1f900000>;
+		reg = <0x1200000 0x1ee00000>;
 	};
 };
