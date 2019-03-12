@@ -163,6 +163,7 @@
 /* AXI DMA Specific Masks/Bit fields */
 #define XILINX_DMA_MAX_TRANS_LEN_MIN	8
 #define XILINX_DMA_MAX_TRANS_LEN_MAX	23
+#define XILINX_DMA_V2_MAX_TRANS_LEN_MAX	26
 #define XILINX_DMA_CR_COALESCE_MAX	GENMASK(23, 16)
 #define XILINX_DMA_CR_CYCLIC_BD_EN_MASK	BIT(4)
 #define XILINX_DMA_CR_COALESCE_SHIFT	16
@@ -382,6 +383,20 @@ struct xilinx_dma_chan {
 	int (*stop_transfer)(struct xilinx_dma_chan *chan);
 	u16 tdest;
 	bool has_vflip;
+};
+
+/**
+ * enum xdma_ip_type - DMA IP type.
+ *
+ * @XDMA_TYPE_AXIDMA: Axi dma ip.
+ * @XDMA_TYPE_CDMA: Axi cdma ip.
+ * @XDMA_TYPE_VDMA: Axi vdma ip.
+ *
+ */
+enum xdma_ip_type {
+	XDMA_TYPE_AXIDMA = 0,
+	XDMA_TYPE_CDMA,
+	XDMA_TYPE_VDMA,
 };
 
 struct xilinx_dma_config {
@@ -995,7 +1010,7 @@ static enum dma_status xilinx_dma_tx_status(struct dma_chan *dchan,
  * xilinx_dma_stop_transfer - Halt DMA channel
  * @chan: Driver specific DMA channel
  *
- * Return: '0' on DMA stop and and failure value on error
+ * Return: '0' on success and failure value on error
  */
 static int xilinx_dma_stop_transfer(struct xilinx_dma_chan *chan)
 {
@@ -1013,7 +1028,7 @@ static int xilinx_dma_stop_transfer(struct xilinx_dma_chan *chan)
  * xilinx_cdma_stop_transfer - Wait for the current transfer to complete
  * @chan: Driver specific DMA channel
  *
- * Return: '0' on CDMA stop and failure value on error
+ * Return: '0' on success and failure value on error
  */
 static int xilinx_cdma_stop_transfer(struct xilinx_dma_chan *chan)
 {
@@ -1091,7 +1106,7 @@ static void xilinx_vdma_start_transfer(struct xilinx_dma_chan *chan)
 		reg &= ~XILINX_VDMA_ENABLE_VERTICAL_FLIP;
 		reg |= config->vflip_en;
 		dma_write(chan, XILINX_VDMA_REG_ENABLE_VERTICAL_FLIP,
-				reg);
+			  reg);
 	}
 
 	reg = dma_ctrl_read(chan, XILINX_DMA_REG_DMACR);
@@ -1146,13 +1161,13 @@ static void xilinx_vdma_start_transfer(struct xilinx_dma_chan *chan)
 		list_for_each_entry(segment, &desc->segments, node) {
 			if (chan->ext_addr)
 				vdma_desc_write_64(chan,
-				  XILINX_VDMA_REG_START_ADDRESS_64(i++),
-				  segment->hw.buf_addr,
-				  segment->hw.buf_addr_msb);
+					XILINX_VDMA_REG_START_ADDRESS_64(i++),
+					segment->hw.buf_addr,
+					segment->hw.buf_addr_msb);
 			else
 				vdma_desc_write(chan,
-				    XILINX_VDMA_REG_START_ADDRESS(i++),
-				    segment->hw.buf_addr);
+					XILINX_VDMA_REG_START_ADDRESS(i++),
+					segment->hw.buf_addr);
 
 			last = segment;
 		}
@@ -1234,8 +1249,10 @@ static void xilinx_cdma_start_transfer(struct xilinx_dma_chan *chan)
 
 		hw = &segment->hw;
 
-		xilinx_write(chan, XILINX_CDMA_REG_SRCADDR, hw->src_addr);
-		xilinx_write(chan, XILINX_CDMA_REG_DSTADDR, hw->dest_addr);
+		xilinx_write(chan, XILINX_CDMA_REG_SRCADDR, (dma_addr_t)
+			     ((u64)hw->src_addr_msb << 32 | hw->src_addr));
+		xilinx_write(chan, XILINX_CDMA_REG_DSTADDR, (dma_addr_t)
+			     ((u64)hw->dest_addr_msb << 32 | hw->dest_addr));
 
 		/* Start the transfer */
 		dma_ctrl_write(chan, XILINX_DMA_REG_BTT,
@@ -2152,18 +2169,20 @@ static int xilinx_dma_terminate_all(struct dma_chan *dchan)
 	u32 reg;
 	int err;
 
-	if (chan->cyclic)
-		xilinx_dma_chan_reset(chan);
-
-	err = chan->stop_transfer(chan);
-	if (err) {
-		dev_err(chan->dev, "Cannot stop channel %p: %x\n",
-			chan, dma_ctrl_read(chan, XILINX_DMA_REG_DMASR));
-		chan->err = true;
+	if (!chan->cyclic) {
+		err = chan->stop_transfer(chan);
+		if (err) {
+			dev_err(chan->dev, "Cannot stop channel %p: %x\n",
+				chan, dma_ctrl_read(chan,
+				XILINX_DMA_REG_DMASR));
+			chan->err = true;
+		}
 	}
 
+	xilinx_dma_chan_reset(chan);
 	/* Remove and free all of the descriptors in the lists */
 	xilinx_dma_free_descriptors(chan);
+	chan->idle = true;
 
 	if (chan->cyclic) {
 		reg = dma_ctrl_read(chan, XILINX_DMA_REG_DMACR);
@@ -2176,7 +2195,6 @@ static int xilinx_dma_terminate_all(struct dma_chan *dchan)
 		dma_ctrl_clr(chan, XILINX_DMA_REG_DMACR,
 			     XILINX_CDMA_CR_SGMODE);
 
-	chan->idle = true;
 	return 0;
 }
 
@@ -2487,9 +2505,9 @@ static int xilinx_dma_chan_probe(struct xilinx_dma_device *xdev,
 	chan->has_sg = xdev->has_sg;
 	chan->desc_pendingcount = 0x0;
 	chan->ext_addr = xdev->ext_addr;
-	/* This variable enusres that descripotrs are not
-	 * Submited when dma engine is in progress. This variable is
-	 * Added to avoid pollling for a bit in the status register to
+	/* This variable ensures that descriptors are not
+	 * Submitted when dma engine is in progress. This variable is
+	 * Added to avoid polling for a bit in the status register to
 	 * Know dma state in the driver hot path.
 	 */
 	chan->idle = true;
@@ -2529,8 +2547,8 @@ static int xilinx_dma_chan_probe(struct xilinx_dma_device *xdev,
 
 		chan->ctrl_offset = XILINX_DMA_MM2S_CTRL_OFFSET;
 		if (xdev->dma_config->dmatype == XDMA_TYPE_VDMA) {
-			chan->config.park = 1;
 			chan->desc_offset = XILINX_VDMA_MM2S_DESC_OFFSET;
+			chan->config.park = 1;
 
 			if (xdev->flush_on_fsync == XILINX_DMA_FLUSH_BOTH ||
 			    xdev->flush_on_fsync == XILINX_DMA_FLUSH_MM2S)
@@ -2554,8 +2572,8 @@ static int xilinx_dma_chan_probe(struct xilinx_dma_device *xdev,
 
 		chan->ctrl_offset = XILINX_DMA_S2MM_CTRL_OFFSET;
 		if (xdev->dma_config->dmatype == XDMA_TYPE_VDMA) {
-			chan->config.park = 1;
 			chan->desc_offset = XILINX_VDMA_S2MM_DESC_OFFSET;
+			chan->config.park = 1;
 
 			if (xdev->flush_on_fsync == XILINX_DMA_FLUSH_BOTH ||
 			    xdev->flush_on_fsync == XILINX_DMA_FLUSH_S2MM)
@@ -2732,12 +2750,14 @@ static int xilinx_dma_probe(struct platform_device *pdev)
 		if (!of_property_read_u32(node, "xlnx,sg-length-width",
 					  &len_width)) {
 			if (len_width < XILINX_DMA_MAX_TRANS_LEN_MIN ||
-			    len_width > XILINX_DMA_MAX_TRANS_LEN_MAX) {
+			    len_width > XILINX_DMA_V2_MAX_TRANS_LEN_MAX) {
 				dev_warn(xdev->dev,
 					 "invalid xlnx,sg-length-width property value using default width\n");
 			} else {
-				xdev->max_buffer_len = GENMASK(len_width - 1,
-							       0);
+				if (len_width > XILINX_DMA_MAX_TRANS_LEN_MAX)
+					dev_warn(xdev->dev, "Please ensure that IP supports buffer length > 23 bits\n");
+
+				xdev->max_buffer_len = GENMASK(len_width - 1, 0);
 			}
 		}
 	}

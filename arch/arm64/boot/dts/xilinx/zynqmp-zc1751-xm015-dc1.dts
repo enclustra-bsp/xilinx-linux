@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * dts file for Xilinx ZynqMP zc1751-xm015-dc1
  *
- * (C) Copyright 2015, Xilinx, Inc.
+ * (C) Copyright 2015 - 2018, Xilinx, Inc.
  *
  * Michal Simek <michal.simek@xilinx.com>
- *
- * SPDX-License-Identifier:	GPL-2.0+
  */
 
 /dts-v1/;
@@ -43,7 +42,6 @@
 	};
 };
 
-/* fpd_dma clk 667MHz, lpd_dma 500MHz */
 &fpd_dma_chan1 {
 	status = "okay";
 };
@@ -106,8 +104,8 @@
 	scl-gpios = <&gpio 36 GPIO_ACTIVE_HIGH>;
 	sda-gpios = <&gpio 37 GPIO_ACTIVE_HIGH>;
 
-	eeprom@55 {
-		compatible = "at,24c64"; /* 24AA64 */
+	eeprom: eeprom@55 {
+		compatible = "atmel,24c64"; /* 24AA64 */
 		reg = <0x55>;
 	};
 };
@@ -325,7 +323,7 @@
 &qspi {
 	status = "okay";
 	flash@0 {
-		compatible = "m25p80"; /* Micron MT25QU512ABB8ESF */
+		compatible = "m25p80", "spi-flash"; /* Micron MT25QU512ABB8ESF */
 		#address-cells = <1>;
 		#size-cells = <1>;
 		reg = <0x0>;

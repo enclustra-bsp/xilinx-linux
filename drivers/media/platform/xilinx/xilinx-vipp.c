@@ -46,6 +46,7 @@ module_param_named(is_mplane, xvip_is_mplane, bool, 0444);
  * @entity: media entity, from the corresponding V4L2 subdev
  * @asd: subdev asynchronous registration information
  * @subdev: V4L2 subdev
+ * @streaming: status of the V4L2 subdev if streaming or not
  */
 struct xvip_graph_entity {
 	struct list_head list;
@@ -54,6 +55,7 @@ struct xvip_graph_entity {
 
 	struct v4l2_async_subdev asd;
 	struct v4l2_subdev *subdev;
+	bool streaming;
 };
 
 /* -----------------------------------------------------------------------------
@@ -96,7 +98,6 @@ static int xvip_graph_build_one(struct xvip_composite_device *xdev,
 		if (next == NULL)
 			break;
 
-		of_node_put(ep);
 		ep = next;
 
 		dev_dbg(xdev->dev, "processing endpoint %pOF\n", ep);
@@ -181,7 +182,6 @@ static int xvip_graph_build_one(struct xvip_composite_device *xdev,
 		}
 	}
 
-	of_node_put(ep);
 	return ret;
 }
 
@@ -196,6 +196,35 @@ xvip_graph_find_dma(struct xvip_composite_device *xdev, unsigned int port)
 	}
 
 	return NULL;
+}
+
+/**
+ * xvip_subdev_set_streaming - Find and update streaming status of subdev
+ * @xdev: Composite video device
+ * @subdev: V4L2 sub-device
+ * @enable: enable/disable streaming status
+ *
+ * Walk the xvip graph entities list and find if subdev is present. Returns
+ * streaming status of subdev and update the status as requested
+ *
+ * Return: streaming status (true or false) if successful or warn_on if subdev
+ * is not present and return false
+ */
+bool xvip_subdev_set_streaming(struct xvip_composite_device *xdev,
+			       struct v4l2_subdev *subdev, bool enable)
+{
+	struct xvip_graph_entity *entity;
+
+	list_for_each_entry(entity, &xdev->entities, list)
+		if (entity->node == subdev->dev->of_node) {
+			bool status = entity->streaming;
+
+			entity->streaming = enable;
+			return status;
+		}
+
+	WARN(1, "Should never get here\n");
+	return false;
 }
 
 static int xvip_graph_build_dma(struct xvip_composite_device *xdev)
@@ -221,7 +250,6 @@ static int xvip_graph_build_dma(struct xvip_composite_device *xdev)
 		if (next == NULL)
 			break;
 
-		of_node_put(ep);
 		ep = next;
 
 		dev_dbg(xdev->dev, "processing endpoint %pOF\n", ep);
@@ -297,7 +325,6 @@ static int xvip_graph_build_dma(struct xvip_composite_device *xdev)
 		}
 	}
 
-	of_node_put(ep);
 	return ret;
 }
 
@@ -631,6 +658,7 @@ static int xvip_composite_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	xdev->dev = &pdev->dev;
+	mutex_init(&xdev->lock);
 	INIT_LIST_HEAD(&xdev->entities);
 	INIT_LIST_HEAD(&xdev->dmas);
 
@@ -657,6 +685,7 @@ static int xvip_composite_remove(struct platform_device *pdev)
 {
 	struct xvip_composite_device *xdev = platform_get_drvdata(pdev);
 
+	mutex_destroy(&xdev->lock);
 	xvip_graph_cleanup(xdev);
 	xvip_composite_v4l2_cleanup(xdev);
 

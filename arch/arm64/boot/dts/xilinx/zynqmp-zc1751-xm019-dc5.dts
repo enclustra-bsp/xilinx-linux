@@ -1,12 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * dts file for Xilinx ZynqMP zc1751-xm019-dc5
  *
- * (C) Copyright 2015, Xilinx, Inc.
+ * (C) Copyright 2015 - 2018, Xilinx, Inc.
  *
  * Siva Durga Prasad <siva.durga.paladugu@xilinx.com>
  * Michal Simek <michal.simek@xilinx.com>
- *
- * SPDX-License-Identifier:	GPL-2.0+
  */
 
 /dts-v1/;
@@ -41,7 +40,6 @@
 	};
 };
 
-/* fpd_dma clk 667MHz, lpd_dma 500MHz */
 &fpd_dma_chan1 {
 	status = "okay";
 };
@@ -89,7 +87,6 @@
 	status = "okay";
 };
 
-/* FIXME: Add device */
 &i2c0 {
 	status = "okay";
 	pinctrl-names = "default", "gpio";
@@ -99,7 +96,6 @@
 	sda-gpios = <&gpio 75 GPIO_ACTIVE_HIGH>;
 };
 
-/* FIXME: Add device */
 &i2c1 {
 	status = "okay";
 	pinctrl-names = "default", "gpio";

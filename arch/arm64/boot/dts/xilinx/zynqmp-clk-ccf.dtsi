@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Clock specification for Xilinx ZynqMP
  *
  * (C) Copyright 2017, Xilinx, Inc.
  *
  * Michal Simek <michal.simek@xilinx.com>
- *
- * SPDX-License-Identifier:     GPL-2.0+
  */
 
 / {
@@ -169,22 +168,22 @@
 };
 
 &gem0 {
-	clocks = <&clk 31>, <&clk 49>, <&clk 45>, <&clk 49>, <&clk 44>;
+	clocks = <&clk 31>, <&clk 104>, <&clk 45>, <&clk 49>, <&clk 44>;
 	clock-names = "pclk", "hclk", "tx_clk", "rx_clk", "tsu_clk";
 };
 
 &gem1 {
-	clocks = <&clk 31>, <&clk 50>, <&clk 46>, <&clk 50>, <&clk 44>;
+	clocks = <&clk 31>, <&clk 105>, <&clk 46>, <&clk 50>, <&clk 44>;
 	clock-names = "pclk", "hclk", "tx_clk", "rx_clk", "tsu_clk";
 };
 
 &gem2 {
-	clocks = <&clk 31>, <&clk 51>, <&clk 47>, <&clk 51>, <&clk 44>;
+	clocks = <&clk 31>, <&clk 106>, <&clk 47>, <&clk 51>, <&clk 44>;
 	clock-names = "pclk", "hclk", "tx_clk", "rx_clk", "tsu_clk";
 };
 
 &gem3 {
-	clocks = <&clk 31>, <&clk 52>, <&clk 48>, <&clk 52>, <&clk 44>;
+	clocks = <&clk 31>, <&clk 107>, <&clk 48>, <&clk 52>, <&clk 44>;
 	clock-names = "pclk", "hclk", "tx_clk", "rx_clk", "tsu_clk";
 };
 
@@ -232,23 +231,43 @@
 	clocks = <&clk 59>, <&clk 31>;
 };
 
+&ttc0 {
+	clocks = <&clk 31>;
+};
+
+&ttc1 {
+	clocks = <&clk 31>;
+};
+
+&ttc2 {
+	clocks = <&clk 31>;
+};
+
+&ttc3 {
+	clocks = <&clk 31>;
+};
+
 &uart0 {
-	clocks = <&clk 56>,  <&clk 31>;
+	clocks = <&clk 56>, <&clk 31>;
 };
 
 &uart1 {
-	clocks = <&clk 57>,  <&clk 31>;
+	clocks = <&clk 57>, <&clk 31>;
 };
 
 &usb0 {
-	clocks = <&clk 32>,  <&clk 34>;
+	clocks = <&clk 32>, <&clk 34>;
 };
 
 &usb1 {
-	clocks = <&clk 33>,  <&clk 34>;
+	clocks = <&clk 33>, <&clk 34>;
 };
 
 &watchdog0 {
+	clocks = <&clk 75>;
+};
+
+&lpd_watchdog {
 	clocks = <&clk 75>;
 };
 
@@ -266,4 +285,8 @@
 
 &zynqmp_dp_snd_codec0 {
 	clocks = <&clk 17>;
+};
+
+&pcap {
+	clocks = <&clk 41>;
 };

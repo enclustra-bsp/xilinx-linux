@@ -336,6 +336,7 @@ static int xadc_zynq_setup(struct platform_device *pdev,
 	unsigned int div;
 	unsigned int igap;
 	unsigned int tck_rate;
+	int ret;
 
 	/* TODO: Figure out how to make igap and tck_rate configurable */
 	igap = XADC_ZYNQ_IGAP_DEFAULT;
@@ -345,12 +346,13 @@ static int xadc_zynq_setup(struct platform_device *pdev,
 
 	pcap_rate = clk_get_rate(xadc->clk);
 
-	if (pcap_rate > XADC_ZYNQ_PCAP_RATE_MAX)
-		clk_set_rate(xadc->clk,
-			(unsigned long) XADC_ZYNQ_PCAP_RATE_MAX);
+	if (pcap_rate > XADC_ZYNQ_PCAP_RATE_MAX) {
+		ret = clk_set_rate(xadc->clk,
+				   (unsigned long)XADC_ZYNQ_PCAP_RATE_MAX);
+		if (ret)
+			return ret;
+	}
 
-	if (tck_rate > XADC_ZYNQ_TCK_RATE_MAX)
-		tck_rate = XADC_ZYNQ_TCK_RATE_MAX;
 	if (tck_rate > pcap_rate / 2) {
 		div = 2;
 	} else {
@@ -376,8 +378,11 @@ static int xadc_zynq_setup(struct platform_device *pdev,
 			XADC_ZYNQ_CFG_REDGE | XADC_ZYNQ_CFG_WEDGE |
 			tck_div | XADC_ZYNQ_CFG_IGAP(igap));
 
-	if (pcap_rate > XADC_ZYNQ_PCAP_RATE_MAX)
-		clk_set_rate(xadc->clk, pcap_rate);
+	if (pcap_rate > XADC_ZYNQ_PCAP_RATE_MAX) {
+		ret = clk_set_rate(xadc->clk, pcap_rate);
+		if (ret)
+			return ret;
+	}
 
 	return 0;
 }
@@ -932,6 +937,9 @@ static int xadc_write_raw(struct iio_dev *indio_dev,
 	unsigned long clk_rate = xadc_get_dclk_rate(xadc);
 	unsigned int div;
 
+	if (!clk_rate)
+		return -EINVAL;
+
 	if (info != IIO_CHAN_INFO_SAMP_FREQ)
 		return -EINVAL;
 
@@ -1090,7 +1098,7 @@ static int xadc_parse_dt(struct iio_dev *indio_dev, struct device_node *np,
 	unsigned int num_channels;
 	const char *external_mux;
 	u32 ext_mux_chan;
-	int reg;
+	u32 reg;
 	int ret;
 
 	*conf = 0;
@@ -1252,8 +1260,8 @@ static int xadc_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_clk_disable_unprepare;
 
-	ret = request_irq(irq, xadc->ops->interrupt_handler, 0,
-			dev_name(&pdev->dev), indio_dev);
+	ret = devm_request_irq(&pdev->dev, irq, xadc->ops->interrupt_handler, 0,
+			       dev_name(&pdev->dev), indio_dev);
 	if (ret)
 		goto err_clk_disable_unprepare;
 
@@ -1263,7 +1271,7 @@ static int xadc_probe(struct platform_device *pdev)
 
 	ret = xadc_write_adc_reg(xadc, XADC_REG_CONF0, conf0);
 	if (ret)
-		goto err_free_irq;
+		goto err_clk_disable_unprepare;
 
 	bipolar_mask = 0;
 	for (i = 0; i < indio_dev->num_channels; i++) {
@@ -1273,15 +1281,17 @@ static int xadc_probe(struct platform_device *pdev)
 
 	ret = xadc_write_adc_reg(xadc, XADC_REG_INPUT_MODE(0), bipolar_mask);
 	if (ret)
-		goto err_free_irq;
+		goto err_clk_disable_unprepare;
 	ret = xadc_write_adc_reg(xadc, XADC_REG_INPUT_MODE(1),
 		bipolar_mask >> 16);
 	if (ret)
-		goto err_free_irq;
+		goto err_clk_disable_unprepare;
 
 	/* Disable all alarms */
-	xadc_update_adc_reg(xadc, XADC_REG_CONF1, XADC_CONF1_ALARM_MASK,
-		XADC_CONF1_ALARM_MASK);
+	ret = xadc_update_adc_reg(xadc, XADC_REG_CONF1, XADC_CONF1_ALARM_MASK,
+				  XADC_CONF1_ALARM_MASK);
+	if (ret)
+		goto err_clk_disable_unprepare;
 
 	/* Set thresholds to min/max */
 	for (i = 0; i < 16; i++) {
@@ -1302,14 +1312,12 @@ static int xadc_probe(struct platform_device *pdev)
 
 	ret = iio_device_register(indio_dev);
 	if (ret)
-		goto err_free_irq;
+		goto err_clk_disable_unprepare;
 
 	platform_set_drvdata(pdev, indio_dev);
 
 	return 0;
 
-err_free_irq:
-	free_irq(irq, indio_dev);
 err_clk_disable_unprepare:
 	clk_disable_unprepare(xadc->clk);
 err_free_samplerate_trigger:
@@ -1331,7 +1339,6 @@ static int xadc_remove(struct platform_device *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct xadc *xadc = iio_priv(indio_dev);
-	int irq = platform_get_irq(pdev, 0);
 
 	iio_device_unregister(indio_dev);
 	if (xadc->ops->flags & XADC_FLAGS_BUFFERED) {
@@ -1339,7 +1346,6 @@ static int xadc_remove(struct platform_device *pdev)
 		iio_trigger_free(xadc->convst_trigger);
 		iio_triggered_buffer_cleanup(indio_dev);
 	}
-	free_irq(irq, indio_dev);
 	clk_disable_unprepare(xadc->clk);
 	cancel_delayed_work(&xadc->zynq_unmask_work);
 	kfree(xadc->data);

@@ -25,6 +25,7 @@
 #include <linux/of_platform.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/reset.h>
 
 /**
  * struct fpga_region - FPGA Region structure
@@ -235,6 +236,7 @@ static int fpga_region_program_fpga(struct fpga_region *region,
 {
 	struct fpga_manager *mgr;
 	int ret;
+	struct reset_control *rstc;
 
 	region = fpga_region_get(region);
 	if (IS_ERR(region)) {
@@ -272,6 +274,13 @@ static int fpga_region_program_fpga(struct fpga_region *region,
 		pr_err("failed to enable region bridges\n");
 		goto err_put_br;
 	}
+
+	rstc = of_reset_control_array_get(overlay, false, true);
+	if (IS_ERR(rstc))
+		goto err_put_br;
+
+	reset_control_reset(rstc);
+	reset_control_put(rstc);
 
 	fpga_mgr_put(mgr);
 	fpga_region_put(region);

@@ -55,12 +55,14 @@ config DRM_XLNX_DSI
 config DRM_XLNX_MIXER
 	tristate "Xilinx DRM Mixer Driver"
 	depends on DRM_XLNX
+	select VIDEOMODE_HELPERS
 	help
 	  DRM driver for Xilinx Mixer driver
 
 config DRM_XLNX_PL_DISP
 	tristate "Xilinx DRM PL display driver"
 	depends on DRM_XLNX
+	select VIDEOMODE_HELPERS
 	help
 	  DRM driver for Xilinx PL display driver, provides drm
 	  crtc and plane object to display pipeline. You need to
@@ -90,3 +92,13 @@ config DRM_XLNX_BRIDGE_SCALER
 	  if scaler is connected to an encoder. The driver provides
 	  upscaling, down scaling and no scaling functionality through
 	  bridge layer.
+
+config DRM_XLNX_BRIDGE_VTC
+	tristate "Xilinx DRM VTC Driver"
+	depends on DRM_XLNX_BRIDGE
+	help
+	  DRM brige driver for Xilinx Video Timing Controller. Choose
+	  this option to make VTC a part of the CRTC in display pipeline.
+	  Currently the support is added to the Xilinx Video Mixer and
+	  Xilinx PL display CRTC drivers. This driver provides ability
+	  to generate timings through the bridge layer.

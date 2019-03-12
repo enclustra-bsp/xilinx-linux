@@ -69,6 +69,23 @@
  * - xlnx_crtc: Xilinx DRM specific crtc functions
  */
 
+/* The default value is ZYNQMP_DISP_AV_BUF_GFX_FMT_RGB565 */
+static uint zynqmp_disp_gfx_init_fmt;
+module_param_named(gfx_init_fmt, zynqmp_disp_gfx_init_fmt, uint, 0444);
+MODULE_PARM_DESC(gfx_init_fmt, "The initial format of the graphics layer\n"
+			       "\t\t0 = rgb565 (default)\n"
+			       "\t\t1 = rgb888\n"
+			       "\t\t2 = argb8888\n");
+/* These value should be mapped to index of av_buf_gfx_fmts[] */
+#define ZYNQMP_DISP_AV_BUF_GFX_FMT_RGB565		10
+#define ZYNQMP_DISP_AV_BUF_GFX_FMT_RGB888		5
+#define ZYNQMP_DISP_AV_BUF_GFX_FMT_ARGB8888		1
+static const u32 zynqmp_disp_gfx_init_fmts[] = {
+	ZYNQMP_DISP_AV_BUF_GFX_FMT_RGB565,
+	ZYNQMP_DISP_AV_BUF_GFX_FMT_RGB888,
+	ZYNQMP_DISP_AV_BUF_GFX_FMT_ARGB8888,
+};
+
 /* Blender registers */
 #define ZYNQMP_DISP_V_BLEND_BG_CLR_0			0x0
 #define ZYNQMP_DISP_V_BLEND_BG_CLR_1			0x4
@@ -629,57 +646,62 @@ zynqmp_disp_blend_set_output_fmt(struct zynqmp_disp_blend *blend, u32 fmt)
 }
 
 /**
- * zynqmp_disp_blend_layer_enable - Enable a layer
+ * zynqmp_disp_blend_layer_coeff - Set the coefficients for @layer
  * @blend: blend object
- * @layer: layer to enable
+ * @layer: layer to set the coefficients for
+ * @on: if layer is on / off
  *
- * Enable a layer @layer.
+ * Depending on the format (rgb / yuv and swap), and the status (on / off),
+ * this function sets the coefficients for the given layer @layer accordingly.
  */
-static void zynqmp_disp_blend_layer_enable(struct zynqmp_disp_blend *blend,
-					   struct zynqmp_disp_layer *layer)
+static void zynqmp_disp_blend_layer_coeff(struct zynqmp_disp_blend *blend,
+					  struct zynqmp_disp_layer *layer,
+					  bool on)
 {
-	u32 reg, offset, i, s0, s1;
+	u32 offset, i, s0, s1;
 	u16 sdtv_coeffs[] = { 0x1000, 0x166f, 0x0,
 			      0x1000, 0x7483, 0x7a7f,
 			      0x1000, 0x0, 0x1c5a };
 	u16 swap_coeffs[] = { 0x1000, 0x0, 0x0,
 			      0x0, 0x1000, 0x0,
 			      0x0, 0x0, 0x1000 };
+	u16 null_coeffs[] = { 0x0, 0x0, 0x0,
+			      0x0, 0x0, 0x0,
+			      0x0, 0x0, 0x0 };
 	u16 *coeffs;
-	u32 offsets[] = { 0x0, 0x1800, 0x1800 };
-
-	reg = layer->fmt->rgb ? ZYNQMP_DISP_V_BLEND_LAYER_CONTROL_RGB : 0;
-	reg |= layer->fmt->chroma_sub ?
-	       ZYNQMP_DISP_V_BLEND_LAYER_CONTROL_EN_US : 0;
-
-	zynqmp_disp_write(blend->base,
-			  ZYNQMP_DISP_V_BLEND_LAYER_CONTROL + layer->offset,
-			  reg);
+	u32 sdtv_offsets[] = { 0x0, 0x1800, 0x1800 };
+	u32 null_offsets[] = { 0x0, 0x0, 0x0 };
+	u32 *offsets;
 
 	if (layer->id == ZYNQMP_DISP_LAYER_VID)
 		offset = ZYNQMP_DISP_V_BLEND_IN1CSC_COEFF0;
 	else
 		offset = ZYNQMP_DISP_V_BLEND_IN2CSC_COEFF0;
 
-	if (!layer->fmt->rgb) {
-		coeffs = sdtv_coeffs;
-		s0 = 1;
-		s1 = 2;
+	if (!on) {
+		coeffs = null_coeffs;
+		offsets = null_offsets;
 	} else {
-		coeffs = swap_coeffs;
-		s0 = 0;
-		s1 = 2;
+		if (!layer->fmt->rgb) {
+			coeffs = sdtv_coeffs;
+			offsets = sdtv_offsets;
+			s0 = 1;
+			s1 = 2;
+		} else {
+			coeffs = swap_coeffs;
+			s0 = 0;
+			s1 = 2;
 
-		/* No offset for RGB formats */
-		for (i = 0; i < ZYNQMP_DISP_V_BLEND_NUM_OFFSET; i++)
-			offsets[i] = 0;
-	}
+			/* No offset for RGB formats */
+			offsets = null_offsets;
+		}
 
-	if (layer->fmt->swap) {
-		for (i = 0; i < 3; i++) {
-			coeffs[i * 3 + s0] ^= coeffs[i * 3 + s1];
-			coeffs[i * 3 + s1] ^= coeffs[i * 3 + s0];
-			coeffs[i * 3 + s0] ^= coeffs[i * 3 + s1];
+		if (layer->fmt->swap) {
+			for (i = 0; i < 3; i++) {
+				coeffs[i * 3 + s0] ^= coeffs[i * 3 + s1];
+				coeffs[i * 3 + s1] ^= coeffs[i * 3 + s0];
+				coeffs[i * 3 + s0] ^= coeffs[i * 3 + s1];
+			}
 		}
 	}
 
@@ -698,6 +720,29 @@ static void zynqmp_disp_blend_layer_enable(struct zynqmp_disp_blend *blend,
 }
 
 /**
+ * zynqmp_disp_blend_layer_enable - Enable a layer
+ * @blend: blend object
+ * @layer: layer to enable
+ *
+ * Enable a layer @layer.
+ */
+static void zynqmp_disp_blend_layer_enable(struct zynqmp_disp_blend *blend,
+					   struct zynqmp_disp_layer *layer)
+{
+	u32 reg;
+
+	reg = layer->fmt->rgb ? ZYNQMP_DISP_V_BLEND_LAYER_CONTROL_RGB : 0;
+	reg |= layer->fmt->chroma_sub ?
+	       ZYNQMP_DISP_V_BLEND_LAYER_CONTROL_EN_US : 0;
+
+	zynqmp_disp_write(blend->base,
+			  ZYNQMP_DISP_V_BLEND_LAYER_CONTROL + layer->offset,
+			  reg);
+
+	zynqmp_disp_blend_layer_coeff(blend, layer, true);
+}
+
+/**
  * zynqmp_disp_blend_layer_disable - Disable a layer
  * @blend: blend object
  * @layer: layer to disable
@@ -707,26 +752,10 @@ static void zynqmp_disp_blend_layer_enable(struct zynqmp_disp_blend *blend,
 static void zynqmp_disp_blend_layer_disable(struct zynqmp_disp_blend *blend,
 					    struct zynqmp_disp_layer *layer)
 {
-	u32 offset;
-	unsigned int i;
-
 	zynqmp_disp_write(blend->base,
 			  ZYNQMP_DISP_V_BLEND_LAYER_CONTROL + layer->offset, 0);
 
-	if (layer->id == ZYNQMP_DISP_LAYER_VID)
-		offset = ZYNQMP_DISP_V_BLEND_IN1CSC_COEFF0;
-	else
-		offset = ZYNQMP_DISP_V_BLEND_IN2CSC_COEFF0;
-	for (i = 0; i < ZYNQMP_DISP_V_BLEND_NUM_COEFF; i++)
-		zynqmp_disp_write(blend->base, offset + i * 4, 0);
-
-	if (layer->id == ZYNQMP_DISP_LAYER_VID)
-		offset = ZYNQMP_DISP_V_BLEND_LUMA_IN1CSC_OFFSET;
-	else
-		offset = ZYNQMP_DISP_V_BLEND_LUMA_IN2CSC_OFFSET;
-
-	for (i = 0; i < ZYNQMP_DISP_V_BLEND_NUM_OFFSET; i++)
-		zynqmp_disp_write(blend->base, offset + i * 4, 0);
+	zynqmp_disp_blend_layer_coeff(blend, layer, false);
 }
 
 /**
@@ -1007,7 +1036,6 @@ static const struct zynqmp_disp_fmt av_buf_vid_fmts[] = {
 };
 
 /* List of graphics layer formats */
-#define ZYNQMP_DISP_AV_BUF_GFX_FMT_RGB565	10
 static const struct zynqmp_disp_fmt av_buf_gfx_fmts[] = {
 	{
 		.drm_fmt	= DRM_FORMAT_ABGR8888,
@@ -1780,6 +1808,7 @@ static int zynqmp_disp_layer_set_tpg(struct zynqmp_disp *disp,
 		return -EIO;
 	}
 
+	zynqmp_disp_blend_layer_coeff(&disp->blend, layer, tpg_on);
 	zynqmp_disp_av_buf_set_tpg(&disp->av_buf, tpg_on);
 	disp->tpg_on = tpg_on;
 
@@ -2453,8 +2482,7 @@ static int zynqmp_disp_plane_mode_set(struct drm_plane *plane,
 	int ret;
 
 	if (!info) {
-		dev_err(dev, "unsupported framebuffer format %s\n",
-			drm_get_format_name(info->format, &format_name));
+		dev_err(dev, "No format info found\n");
 		return -EINVAL;
 	}
 
@@ -2547,8 +2575,57 @@ zynqmp_disp_plane_atomic_get_property(struct drm_plane *plane,
 	return ret;
 }
 
+static int
+zynqmp_disp_plane_atomic_update_plane(struct drm_plane *plane,
+				      struct drm_crtc *crtc,
+				      struct drm_framebuffer *fb,
+				      int crtc_x, int crtc_y,
+				      unsigned int crtc_w, unsigned int crtc_h,
+				      u32 src_x, u32 src_y,
+				      u32 src_w, u32 src_h,
+				      struct drm_modeset_acquire_ctx *ctx)
+{
+	struct drm_atomic_state *state;
+	struct drm_plane_state *plane_state;
+	int ret;
+
+	state = drm_atomic_state_alloc(plane->dev);
+	if (!state)
+		return -ENOMEM;
+
+	state->acquire_ctx = ctx;
+	plane_state = drm_atomic_get_plane_state(state, plane);
+	if (IS_ERR(plane_state)) {
+		ret = PTR_ERR(plane_state);
+		goto fail;
+	}
+
+	ret = drm_atomic_set_crtc_for_plane(plane_state, crtc);
+	if (ret)
+		goto fail;
+	drm_atomic_set_fb_for_plane(plane_state, fb);
+	plane_state->crtc_x = crtc_x;
+	plane_state->crtc_y = crtc_y;
+	plane_state->crtc_w = crtc_w;
+	plane_state->crtc_h = crtc_h;
+	plane_state->src_x = src_x;
+	plane_state->src_y = src_y;
+	plane_state->src_w = src_w;
+	plane_state->src_h = src_h;
+
+	if (plane == crtc->cursor)
+		state->legacy_cursor_update = true;
+
+	/* Do async-update if possible */
+	state->async_update = !drm_atomic_helper_async_check(plane->dev, state);
+	ret = drm_atomic_commit(state);
+fail:
+	drm_atomic_state_put(state);
+	return ret;
+}
+
 static struct drm_plane_funcs zynqmp_disp_plane_funcs = {
-	.update_plane		= drm_atomic_helper_update_plane,
+	.update_plane		= zynqmp_disp_plane_atomic_update_plane,
 	.disable_plane		= drm_atomic_helper_disable_plane,
 	.atomic_set_property	= zynqmp_disp_plane_atomic_set_property,
 	.atomic_get_property	= zynqmp_disp_plane_atomic_get_property,
@@ -2593,9 +2670,43 @@ zynqmp_disp_plane_atomic_disable(struct drm_plane *plane,
 	zynqmp_disp_plane_disable(plane);
 }
 
+static int zynqmp_disp_plane_atomic_async_check(struct drm_plane *plane,
+						struct drm_plane_state *state)
+{
+	return 0;
+}
+
+static void
+zynqmp_disp_plane_atomic_async_update(struct drm_plane *plane,
+				      struct drm_plane_state *new_state)
+{
+	struct drm_plane_state *old_state =
+		drm_atomic_get_old_plane_state(new_state->state, plane);
+
+	if (plane->state->fb == new_state->fb)
+		return;
+
+	 /* Update the current state with new configurations */
+	drm_atomic_set_fb_for_plane(plane->state, new_state->fb);
+	plane->state->crtc = new_state->crtc;
+	plane->state->crtc_x = new_state->crtc_x;
+	plane->state->crtc_y = new_state->crtc_y;
+	plane->state->crtc_w = new_state->crtc_w;
+	plane->state->crtc_h = new_state->crtc_h;
+	plane->state->src_x = new_state->src_x;
+	plane->state->src_y = new_state->src_y;
+	plane->state->src_w = new_state->src_w;
+	plane->state->src_h = new_state->src_h;
+	plane->state->state = new_state->state;
+
+	zynqmp_disp_plane_atomic_update(plane, old_state);
+}
+
 static const struct drm_plane_helper_funcs zynqmp_disp_plane_helper_funcs = {
-	.atomic_update	= zynqmp_disp_plane_atomic_update,
-	.atomic_disable	= zynqmp_disp_plane_atomic_disable,
+	.atomic_update		= zynqmp_disp_plane_atomic_update,
+	.atomic_disable		= zynqmp_disp_plane_atomic_disable,
+	.atomic_async_check	= zynqmp_disp_plane_atomic_async_check,
+	.atomic_async_update	= zynqmp_disp_plane_atomic_async_update,
 };
 
 static int zynqmp_disp_create_plane(struct zynqmp_disp *disp)
@@ -2780,6 +2891,7 @@ zynqmp_disp_crtc_atomic_disable(struct drm_crtc *crtc,
 	zynqmp_disp_clk_disable(disp->pclk, &disp->pclk_en);
 	zynqmp_disp_plane_disable(crtc->primary);
 	zynqmp_disp_disable(disp, true);
+	drm_crtc_vblank_off(crtc);
 	pm_runtime_put_sync(disp->dev);
 }
 
@@ -2793,6 +2905,7 @@ static void
 zynqmp_disp_crtc_atomic_begin(struct drm_crtc *crtc,
 			      struct drm_crtc_state *old_crtc_state)
 {
+	drm_crtc_vblank_on(crtc);
 	/* Don't rely on vblank when disabling crtc */
 	spin_lock_irq(&crtc->dev->event_lock);
 	if (crtc->primary->state->fb && crtc->state->event) {
@@ -2997,6 +3110,7 @@ static int zynqmp_disp_enumerate_fmts(struct zynqmp_disp *disp)
 	struct zynqmp_disp_layer *layer;
 	u32 *bus_fmts;
 	u32 i, size, num_bus_fmts;
+	u32 gfx_fmt = ZYNQMP_DISP_AV_BUF_GFX_FMT_RGB565;
 
 	num_bus_fmts = ARRAY_SIZE(av_buf_live_fmts);
 	bus_fmts = devm_kzalloc(disp->dev, sizeof(*bus_fmts) * num_bus_fmts,
@@ -3033,7 +3147,9 @@ static int zynqmp_disp_enumerate_fmts(struct zynqmp_disp *disp)
 
 	for (i = 0; i < layer->num_fmts; i++)
 		layer->drm_fmts[i] = av_buf_gfx_fmts[i].drm_fmt;
-	layer->fmt = &av_buf_gfx_fmts[ZYNQMP_DISP_AV_BUF_GFX_FMT_RGB565];
+	if (zynqmp_disp_gfx_init_fmt < ARRAY_SIZE(zynqmp_disp_gfx_init_fmts))
+		gfx_fmt = zynqmp_disp_gfx_init_fmts[zynqmp_disp_gfx_init_fmt];
+	layer->fmt = &av_buf_gfx_fmts[gfx_fmt];
 
 	return 0;
 }
