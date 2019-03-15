@@ -223,6 +223,7 @@
 	non-removable;
 	disable-wp;
 	xlnx,mio_bank = <0>;
+	bus-width = <8>;
 };
 
 &serdes {
