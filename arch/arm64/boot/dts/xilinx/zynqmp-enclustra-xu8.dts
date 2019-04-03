@@ -253,8 +253,6 @@
 	status = "okay";
 	dr_mode = "host";
 	snps,usb3_lpm_capable;
-	phy-names = "usb3-phy";
-	phys = <&lane2 PHY_TYPE_USB3 0 2 100000000>;
 	maximum-speed = "super-speed";
 };
 
