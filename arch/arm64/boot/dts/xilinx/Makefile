@@ -14,6 +14,7 @@ dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-zcu102-revA.dtb
 dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-zcu102-revB.dtb
 dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-enclustra-xu1.dtb
 dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-enclustra-xu3.dtb
+dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-enclustra-xu3-st3.dtb
 dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-enclustra-xu5.dtb
 dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-enclustra-xu7.dtb
 dtb-$(CONFIG_ARCH_ZYNQMP) += zynqmp-enclustra-xu8.dtb
