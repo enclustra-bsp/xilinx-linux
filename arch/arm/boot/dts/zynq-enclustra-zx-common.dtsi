@@ -15,18 +15,18 @@
 		view-port = <0x0170>;
 		drv-vbus;
 	};
-	mdio@e000b000 {
-                compatible = "cdns,macb-mdio";
-                reg = <0xe000b000 0x1000>;
-                clocks = <&clkc 30>, <&clkc 30>, <&clkc 13>;
-                clock-names = "pclk", "hclk", "tx_clk";
-                #address-cells = <1>;
-                #size-cells = <0>;
-                phy3: ethernet-phy@3 {
-                        reg = <3>;
-                };
-        };
 
+	mdio@e000b000 {
+		compatible = "cdns,macb-mdio";
+		reg = <0xe000b000 0x1000>;
+		clocks = <&clkc 30>, <&clkc 30>, <&clkc 13>;
+		clock-names = "pclk", "hclk", "tx_clk";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		phy3: ethernet-phy@3 {
+		        reg = <3>;
+		};
+	};
 };
 
 &gem0 {
