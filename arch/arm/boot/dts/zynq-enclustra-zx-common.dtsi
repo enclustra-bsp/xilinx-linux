@@ -1,21 +1,21 @@
 / {
-	memory {
+	memory@20000000 {
 		device_type = "memory";
 		reg = <0x0 0x20000000>;
 	};
 
 	chosen {
-		linux,stdout-path = "/amba/serial@e0000000";
+		stdout-path = "/amba/serial@e0000000";
 	};
 
-	usb_phy0: phy0 {
+	usb_phy0: phy0@e0002000 {
 		compatible = "ulpi-phy";
 		#phy-cells = <0>;
 		reg = <0xe0002000 0x1000>;
 		view-port = <0x0170>;
 		drv-vbus;
 	};
-	mdio {
+	mdio@e000b000 {
                 compatible = "cdns,macb-mdio";
                 reg = <0xe000b000 0x1000>;
                 clocks = <&clkc 30>, <&clkc 30>, <&clkc 13>;
