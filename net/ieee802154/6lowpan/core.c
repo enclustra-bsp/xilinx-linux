@@ -58,13 +58,6 @@ static const struct header_ops lowpan_header_ops = {
 	.create	= lowpan_header_create,
 };
 
-static int lowpan_dev_init(struct net_device *ldev)
-{
-	netdev_lockdep_set_classes(ldev);
-
-	return 0;
-}
-
 static int lowpan_open(struct net_device *dev)
 {
 	if (!open_count)
@@ -90,12 +83,17 @@ static int lowpan_neigh_construct(struct net_device *dev, struct neighbour *n)
 	return 0;
 }
 
+static int lowpan_get_iflink(const struct net_device *dev)
+{
+	return lowpan_802154_dev(dev)->wdev->ifindex;
+}
+
 static const struct net_device_ops lowpan_netdev_ops = {
-	.ndo_init		= lowpan_dev_init,
 	.ndo_start_xmit		= lowpan_xmit,
 	.ndo_open		= lowpan_open,
 	.ndo_stop		= lowpan_stop,
 	.ndo_neigh_construct    = lowpan_neigh_construct,
+	.ndo_get_iflink         = lowpan_get_iflink,
 };
 
 static void lowpan_setup(struct net_device *ldev)
@@ -104,6 +102,7 @@ static void lowpan_setup(struct net_device *ldev)
 	/* We need an ipv6hdr as minimum len when calling xmit */
 	ldev->hard_header_len	= sizeof(struct ipv6hdr);
 	ldev->flags		= IFF_BROADCAST | IFF_MULTICAST;
+	ldev->priv_flags	|= IFF_NO_QUEUE;
 
 	ldev->netdev_ops	= &lowpan_netdev_ops;
 	ldev->header_ops	= &lowpan_header_ops;
@@ -206,9 +205,13 @@ static inline void lowpan_netlink_fini(void)
 static int lowpan_device_event(struct notifier_block *unused,
 			       unsigned long event, void *ptr)
 {
-	struct net_device *wdev = netdev_notifier_info_to_dev(ptr);
+	struct net_device *ndev = netdev_notifier_info_to_dev(ptr);
+	struct wpan_dev *wpan_dev;
 
-	if (wdev->type != ARPHRD_IEEE802154)
+	if (ndev->type != ARPHRD_IEEE802154)
+		return NOTIFY_DONE;
+	wpan_dev = ndev->ieee802154_ptr;
+	if (!wpan_dev)
 		return NOTIFY_DONE;
 
 	switch (event) {
@@ -217,8 +220,8 @@ static int lowpan_device_event(struct notifier_block *unused,
 		 * also delete possible lowpan interfaces which belongs
 		 * to the wpan interface.
 		 */
-		if (wdev->ieee802154_ptr->lowpan_dev)
-			lowpan_dellink(wdev->ieee802154_ptr->lowpan_dev, NULL);
+		if (wpan_dev->lowpan_dev)
+			lowpan_dellink(wpan_dev->lowpan_dev, NULL);
 		break;
 	default:
 		return NOTIFY_DONE;

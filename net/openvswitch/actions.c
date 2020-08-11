@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2007-2017 Nicira, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -43,6 +30,7 @@
 #include "flow.h"
 #include "conntrack.h"
 #include "vport.h"
+#include "flow_netlink.h"
 
 struct deferred_action {
 	struct sk_buff *skb;
@@ -168,50 +156,19 @@ static int clone_execute(struct datapath *dp, struct sk_buff *skb,
 			 const struct nlattr *actions, int len,
 			 bool last, bool clone_flow_key);
 
-static void update_ethertype(struct sk_buff *skb, struct ethhdr *hdr,
-			     __be16 ethertype)
-{
-	if (skb->ip_summed == CHECKSUM_COMPLETE) {
-		__be16 diff[] = { ~(hdr->h_proto), ethertype };
-
-		skb->csum = ~csum_partial((char *)diff, sizeof(diff),
-					~skb->csum);
-	}
-
-	hdr->h_proto = ethertype;
-}
+static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
+			      struct sw_flow_key *key,
+			      const struct nlattr *attr, int len);
 
 static int push_mpls(struct sk_buff *skb, struct sw_flow_key *key,
 		     const struct ovs_action_push_mpls *mpls)
 {
-	struct mpls_shim_hdr *new_mpls_lse;
+	int err;
 
-	/* Networking stack do not allow simultaneous Tunnel and MPLS GSO. */
-	if (skb->encapsulation)
-		return -ENOTSUPP;
-
-	if (skb_cow_head(skb, MPLS_HLEN) < 0)
-		return -ENOMEM;
-
-	if (!skb->inner_protocol) {
-		skb_set_inner_network_header(skb, skb->mac_len);
-		skb_set_inner_protocol(skb, skb->protocol);
-	}
-
-	skb_push(skb, MPLS_HLEN);
-	memmove(skb_mac_header(skb) - MPLS_HLEN, skb_mac_header(skb),
-		skb->mac_len);
-	skb_reset_mac_header(skb);
-	skb_set_network_header(skb, skb->mac_len);
-
-	new_mpls_lse = mpls_hdr(skb);
-	new_mpls_lse->label_stack_entry = mpls->mpls_lse;
-
-	skb_postpush_rcsum(skb, new_mpls_lse, MPLS_HLEN);
-
-	if (ovs_key_mac_proto(key) == MAC_PROTO_ETHERNET)
-		update_ethertype(skb, eth_hdr(skb), mpls->mpls_ethertype);
-	skb->protocol = mpls->mpls_ethertype;
+	err = skb_mpls_push(skb, mpls->mpls_lse, mpls->mpls_ethertype,
+			    skb->mac_len);
+	if (err)
+		return err;
 
 	invalidate_flow_key(key);
 	return 0;
@@ -222,30 +179,9 @@ static int pop_mpls(struct sk_buff *skb, struct sw_flow_key *key,
 {
 	int err;
 
-	err = skb_ensure_writable(skb, skb->mac_len + MPLS_HLEN);
-	if (unlikely(err))
+	err = skb_mpls_pop(skb, ethertype, skb->mac_len);
+	if (err)
 		return err;
-
-	skb_postpull_rcsum(skb, mpls_hdr(skb), MPLS_HLEN);
-
-	memmove(skb_mac_header(skb) + MPLS_HLEN, skb_mac_header(skb),
-		skb->mac_len);
-
-	__skb_pull(skb, MPLS_HLEN);
-	skb_reset_mac_header(skb);
-	skb_set_network_header(skb, skb->mac_len);
-
-	if (ovs_key_mac_proto(key) == MAC_PROTO_ETHERNET) {
-		struct ethhdr *hdr;
-
-		/* mpls_hdr() is used to locate the ethertype field correctly in the
-		 * presence of VLAN tags.
-		 */
-		hdr = (struct ethhdr *)((void *)mpls_hdr(skb) - ETH_HLEN);
-		update_ethertype(skb, hdr, ethertype);
-	}
-	if (eth_p_mpls(skb->protocol))
-		skb->protocol = ethertype;
 
 	invalidate_flow_key(key);
 	return 0;
@@ -258,20 +194,12 @@ static int set_mpls(struct sk_buff *skb, struct sw_flow_key *flow_key,
 	__be32 lse;
 	int err;
 
-	err = skb_ensure_writable(skb, skb->mac_len + MPLS_HLEN);
-	if (unlikely(err))
-		return err;
-
 	stack = mpls_hdr(skb);
 	lse = OVS_MASKED(stack->label_stack_entry, *mpls_lse, *mask);
-	if (skb->ip_summed == CHECKSUM_COMPLETE) {
-		__be32 diff[] = { ~(stack->label_stack_entry), lse };
+	err = skb_mpls_update_lse(skb, lse);
+	if (err)
+		return err;
 
-		skb->csum = ~csum_partial((char *)diff, sizeof(diff),
-					  ~skb->csum);
-	}
-
-	stack->label_stack_entry = lse;
 	flow_key->mpls.top_lse = lse;
 	return 0;
 }
@@ -300,7 +228,7 @@ static int push_vlan(struct sk_buff *skb, struct sw_flow_key *key,
 		key->eth.vlan.tpid = vlan->vlan_tpid;
 	}
 	return skb_vlan_push(skb, vlan->vlan_tpid,
-			     ntohs(vlan->vlan_tci) & ~VLAN_TAG_PRESENT);
+			     ntohs(vlan->vlan_tci) & ~VLAN_CFI_MASK);
 }
 
 /* 'src' is already properly masked. */
@@ -376,6 +304,38 @@ static int push_eth(struct sk_buff *skb, struct sw_flow_key *key,
 
 	/* safe right before invalidate_flow_key */
 	key->mac_proto = MAC_PROTO_ETHERNET;
+	invalidate_flow_key(key);
+	return 0;
+}
+
+static int push_nsh(struct sk_buff *skb, struct sw_flow_key *key,
+		    const struct nshhdr *nh)
+{
+	int err;
+
+	err = nsh_push(skb, nh);
+	if (err)
+		return err;
+
+	/* safe right before invalidate_flow_key */
+	key->mac_proto = MAC_PROTO_NONE;
+	invalidate_flow_key(key);
+	return 0;
+}
+
+static int pop_nsh(struct sk_buff *skb, struct sw_flow_key *key)
+{
+	int err;
+
+	err = nsh_pop(skb);
+	if (err)
+		return err;
+
+	/* safe right before invalidate_flow_key */
+	if (skb->protocol == htons(ETH_P_TEB))
+		key->mac_proto = MAC_PROTO_ETHERNET;
+	else
+		key->mac_proto = MAC_PROTO_NONE;
 	invalidate_flow_key(key);
 	return 0;
 }
@@ -602,6 +562,69 @@ static int set_ipv6(struct sk_buff *skb, struct sw_flow_key *flow_key,
 	return 0;
 }
 
+static int set_nsh(struct sk_buff *skb, struct sw_flow_key *flow_key,
+		   const struct nlattr *a)
+{
+	struct nshhdr *nh;
+	size_t length;
+	int err;
+	u8 flags;
+	u8 ttl;
+	int i;
+
+	struct ovs_key_nsh key;
+	struct ovs_key_nsh mask;
+
+	err = nsh_key_from_nlattr(a, &key, &mask);
+	if (err)
+		return err;
+
+	/* Make sure the NSH base header is there */
+	if (!pskb_may_pull(skb, skb_network_offset(skb) + NSH_BASE_HDR_LEN))
+		return -ENOMEM;
+
+	nh = nsh_hdr(skb);
+	length = nsh_hdr_len(nh);
+
+	/* Make sure the whole NSH header is there */
+	err = skb_ensure_writable(skb, skb_network_offset(skb) +
+				       length);
+	if (unlikely(err))
+		return err;
+
+	nh = nsh_hdr(skb);
+	skb_postpull_rcsum(skb, nh, length);
+	flags = nsh_get_flags(nh);
+	flags = OVS_MASKED(flags, key.base.flags, mask.base.flags);
+	flow_key->nsh.base.flags = flags;
+	ttl = nsh_get_ttl(nh);
+	ttl = OVS_MASKED(ttl, key.base.ttl, mask.base.ttl);
+	flow_key->nsh.base.ttl = ttl;
+	nsh_set_flags_and_ttl(nh, flags, ttl);
+	nh->path_hdr = OVS_MASKED(nh->path_hdr, key.base.path_hdr,
+				  mask.base.path_hdr);
+	flow_key->nsh.base.path_hdr = nh->path_hdr;
+	switch (nh->mdtype) {
+	case NSH_M_TYPE1:
+		for (i = 0; i < NSH_MD1_CONTEXT_SIZE; i++) {
+			nh->md1.context[i] =
+			    OVS_MASKED(nh->md1.context[i], key.context[i],
+				       mask.context[i]);
+		}
+		memcpy(flow_key->nsh.context, nh->md1.context,
+		       sizeof(nh->md1.context));
+		break;
+	case NSH_M_TYPE2:
+		memset(flow_key->nsh.context, 0,
+		       sizeof(flow_key->nsh.context));
+		break;
+	default:
+		return -EINVAL;
+	}
+	skb_postpush_rcsum(skb, nh, length);
+	return 0;
+}
+
 /* Must follow skb_ensure_writable() since that can move the skb data. */
 static void set_tp_port(struct sk_buff *skb, __be16 *port,
 			__be16 new_port, __sum16 *check)
@@ -726,8 +749,10 @@ static int ovs_vport_output(struct net *net, struct sock *sk, struct sk_buff *sk
 	__skb_dst_copy(skb, data->dst);
 	*OVS_CB(skb) = data->cb;
 	skb->inner_protocol = data->inner_protocol;
-	skb->vlan_tci = data->vlan_tci;
-	skb->vlan_proto = data->vlan_proto;
+	if (data->vlan_tci & VLAN_CFI_MASK)
+		__vlan_hwaccel_put_tag(skb, data->vlan_proto, data->vlan_tci & ~VLAN_CFI_MASK);
+	else
+		__vlan_hwaccel_clear_tag(skb);
 
 	/* Reconstruct the MAC header.  */
 	skb_push(skb, data->l2_len);
@@ -771,7 +796,10 @@ static void prepare_frag(struct vport *vport, struct sk_buff *skb,
 	data->cb = *OVS_CB(skb);
 	data->inner_protocol = skb->inner_protocol;
 	data->network_offset = orig_network_offset;
-	data->vlan_tci = skb->vlan_tci;
+	if (skb_vlan_tag_present(skb))
+		data->vlan_tci = skb_vlan_tag_get(skb) | VLAN_CFI_MASK;
+	else
+		data->vlan_tci = 0;
 	data->vlan_proto = skb->vlan_proto;
 	data->mac_proto = mac_proto;
 	data->l2_len = hlen;
@@ -961,6 +989,28 @@ static int sample(struct datapath *dp, struct sk_buff *skb,
 			     clone_flow_key);
 }
 
+/* When 'last' is true, clone() should always consume the 'skb'.
+ * Otherwise, clone() should keep 'skb' intact regardless what
+ * actions are executed within clone().
+ */
+static int clone(struct datapath *dp, struct sk_buff *skb,
+		 struct sw_flow_key *key, const struct nlattr *attr,
+		 bool last)
+{
+	struct nlattr *actions;
+	struct nlattr *clone_arg;
+	int rem = nla_len(attr);
+	bool dont_clone_flow_key;
+
+	/* The first action is always 'OVS_CLONE_ATTR_ARG'. */
+	clone_arg = nla_data(attr);
+	dont_clone_flow_key = nla_get_u32(clone_arg);
+	actions = nla_next(clone_arg, &rem);
+
+	return clone_execute(dp, skb, key, 0, actions, rem, last,
+			     !dont_clone_flow_key);
+}
+
 static void execute_hash(struct sk_buff *skb, struct sw_flow_key *key,
 			 const struct nlattr *attr)
 {
@@ -1024,6 +1074,10 @@ static int execute_masked_set_action(struct sk_buff *skb,
 				   get_mask(a, struct ovs_key_ethernet *));
 		break;
 
+	case OVS_KEY_ATTR_NSH:
+		err = set_nsh(skb, flow_key, a);
+		break;
+
 	case OVS_KEY_ATTR_IPV4:
 		err = set_ipv4(skb, flow_key, nla_data(a),
 			       get_mask(a, struct ovs_key_ipv4 *));
@@ -1084,6 +1138,40 @@ static int execute_recirc(struct datapath *dp, struct sk_buff *skb,
 
 	recirc_id = nla_get_u32(a);
 	return clone_execute(dp, skb, key, recirc_id, NULL, 0, last, true);
+}
+
+static int execute_check_pkt_len(struct datapath *dp, struct sk_buff *skb,
+				 struct sw_flow_key *key,
+				 const struct nlattr *attr, bool last)
+{
+	const struct nlattr *actions, *cpl_arg;
+	const struct check_pkt_len_arg *arg;
+	int rem = nla_len(attr);
+	bool clone_flow_key;
+
+	/* The first netlink attribute in 'attr' is always
+	 * 'OVS_CHECK_PKT_LEN_ATTR_ARG'.
+	 */
+	cpl_arg = nla_data(attr);
+	arg = nla_data(cpl_arg);
+
+	if (skb->len <= arg->pkt_len) {
+		/* Second netlink attribute in 'attr' is always
+		 * 'OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_LESS_EQUAL'.
+		 */
+		actions = nla_next(cpl_arg, &rem);
+		clone_flow_key = !arg->exec_for_lesser_equal;
+	} else {
+		/* Third netlink attribute in 'attr' is always
+		 * 'OVS_CHECK_PKT_LEN_ATTR_ACTIONS_IF_GREATER'.
+		 */
+		actions = nla_next(cpl_arg, &rem);
+		actions = nla_next(actions, &rem);
+		clone_flow_key = !arg->exec_for_greater;
+	}
+
+	return clone_execute(dp, skb, key, 0, nla_data(actions),
+			     nla_len(actions), last, clone_flow_key);
 }
 
 /* Execute a list of actions against 'skb'. */
@@ -1203,6 +1291,10 @@ static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
 				return err == -EINPROGRESS ? 0 : err;
 			break;
 
+		case OVS_ACTION_ATTR_CT_CLEAR:
+			err = ovs_ct_clear(skb, key);
+			break;
+
 		case OVS_ACTION_ATTR_PUSH_ETH:
 			err = push_eth(skb, key, nla_data(a));
 			break;
@@ -1210,6 +1302,49 @@ static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
 		case OVS_ACTION_ATTR_POP_ETH:
 			err = pop_eth(skb, key);
 			break;
+
+		case OVS_ACTION_ATTR_PUSH_NSH: {
+			u8 buffer[NSH_HDR_MAX_LEN];
+			struct nshhdr *nh = (struct nshhdr *)buffer;
+
+			err = nsh_hdr_from_nlattr(nla_data(a), nh,
+						  NSH_HDR_MAX_LEN);
+			if (unlikely(err))
+				break;
+			err = push_nsh(skb, key, nh);
+			break;
+		}
+
+		case OVS_ACTION_ATTR_POP_NSH:
+			err = pop_nsh(skb, key);
+			break;
+
+		case OVS_ACTION_ATTR_METER:
+			if (ovs_meter_execute(dp, skb, key, nla_get_u32(a))) {
+				consume_skb(skb);
+				return 0;
+			}
+			break;
+
+		case OVS_ACTION_ATTR_CLONE: {
+			bool last = nla_is_last(a, rem);
+
+			err = clone(dp, skb, key, a, last);
+			if (last)
+				return err;
+
+			break;
+		}
+
+		case OVS_ACTION_ATTR_CHECK_PKT_LEN: {
+			bool last = nla_is_last(a, rem);
+
+			err = execute_check_pkt_len(dp, skb, key, a, last);
+			if (last)
+				return err;
+
+			break;
+		}
 		}
 
 		if (unlikely(err)) {

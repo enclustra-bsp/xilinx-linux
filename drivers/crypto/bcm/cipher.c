@@ -1,17 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2016 Broadcom
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, version 2, as
- * published by the Free Software Foundation (the "GPL").
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 (GPLv2) for more details.
- *
- * You should have received a copy of the GNU General Public License
- * version 2 (GPLv2) along with this source code.
  */
 
 #include <linux/err.h>
@@ -35,14 +24,13 @@
 #include <crypto/aead.h>
 #include <crypto/internal/aead.h>
 #include <crypto/aes.h>
-#include <crypto/des.h>
+#include <crypto/internal/des.h>
 #include <crypto/hmac.h>
 #include <crypto/sha.h>
 #include <crypto/md5.h>
 #include <crypto/authenc.h>
 #include <crypto/skcipher.h>
 #include <crypto/hash.h>
-#include <crypto/aes.h>
 #include <crypto/sha3.h>
 
 #include "util.h"
@@ -97,7 +85,7 @@ MODULE_PARM_DESC(aead_pri, "Priority for AEAD algos");
  * 0x70 - ring 2
  * 0x78 - ring 3
  */
-char BCMHEADER[] = { 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28 };
+static char BCMHEADER[] = { 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28 };
 /*
  * Some SPU hw does not use BCM header on SPU messages. So BCM_HDR_LEN
  * is set dynamically after reading SPU type from device tree.
@@ -256,6 +244,44 @@ spu_ablkcipher_tx_sg_create(struct brcm_message *mssg,
 	return 0;
 }
 
+static int mailbox_send_message(struct brcm_message *mssg, u32 flags,
+				u8 chan_idx)
+{
+	int err;
+	int retry_cnt = 0;
+	struct device *dev = &(iproc_priv.pdev->dev);
+
+	err = mbox_send_message(iproc_priv.mbox[chan_idx], mssg);
+	if (flags & CRYPTO_TFM_REQ_MAY_SLEEP) {
+		while ((err == -ENOBUFS) && (retry_cnt < SPU_MB_RETRY_MAX)) {
+			/*
+			 * Mailbox queue is full. Since MAY_SLEEP is set, assume
+			 * not in atomic context and we can wait and try again.
+			 */
+			retry_cnt++;
+			usleep_range(MBOX_SLEEP_MIN, MBOX_SLEEP_MAX);
+			err = mbox_send_message(iproc_priv.mbox[chan_idx],
+						mssg);
+			atomic_inc(&iproc_priv.mb_no_spc);
+		}
+	}
+	if (err < 0) {
+		atomic_inc(&iproc_priv.mb_send_fail);
+		return err;
+	}
+
+	/* Check error returned by mailbox controller */
+	err = mssg->error;
+	if (unlikely(err < 0)) {
+		dev_err(dev, "message error %d", err);
+		/* Signal txdone for mailbox channel */
+	}
+
+	/* Signal txdone for mailbox channel */
+	mbox_client_txdone(iproc_priv.mbox[chan_idx], err);
+	return err;
+}
+
 /**
  * handle_ablkcipher_req() - Submit as much of a block cipher request as fits in
  * a single SPU request message, starting at the current position in the request
@@ -293,7 +319,6 @@ static int handle_ablkcipher_req(struct iproc_reqctx_s *rctx)
 	u32 pad_len;		/* total length of all padding */
 	bool update_key = false;
 	struct brcm_message *mssg;	/* mailbox message */
-	int retry_cnt = 0;
 
 	/* number of entries in src and dst sg in mailbox message. */
 	u8 rx_frag_num = 2;	/* response header and STATUS */
@@ -462,24 +487,9 @@ static int handle_ablkcipher_req(struct iproc_reqctx_s *rctx)
 	if (err)
 		return err;
 
-	err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx], mssg);
-	if (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) {
-		while ((err == -ENOBUFS) && (retry_cnt < SPU_MB_RETRY_MAX)) {
-			/*
-			 * Mailbox queue is full. Since MAY_SLEEP is set, assume
-			 * not in atomic context and we can wait and try again.
-			 */
-			retry_cnt++;
-			usleep_range(MBOX_SLEEP_MIN, MBOX_SLEEP_MAX);
-			err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx],
-						mssg);
-			atomic_inc(&iproc_priv.mb_no_spc);
-		}
-	}
-	if (unlikely(err < 0)) {
-		atomic_inc(&iproc_priv.mb_send_fail);
+	err = mailbox_send_message(mssg, req->base.flags, rctx->chan_idx);
+	if (unlikely(err < 0))
 		return err;
-	}
 
 	return -EINPROGRESS;
 }
@@ -696,7 +706,7 @@ static int handle_ahash_req(struct iproc_reqctx_s *rctx)
 	 */
 	unsigned int new_data_len;
 
-	unsigned int chunk_start = 0;
+	unsigned int __maybe_unused chunk_start = 0;
 	u32 db_size;	 /* Length of data field, incl gcm and hash padding */
 	int pad_len = 0; /* total pad len, including gcm, hash, stat padding */
 	u32 data_pad_len = 0;	/* length of GCM/CCM padding */
@@ -710,7 +720,6 @@ static int handle_ahash_req(struct iproc_reqctx_s *rctx)
 	u32 spu_hdr_len;
 	unsigned int digestsize;
 	u16 rem = 0;
-	int retry_cnt = 0;
 
 	/*
 	 * number of entries in src and dst sg. Always includes SPU msg header.
@@ -798,7 +807,7 @@ static int handle_ahash_req(struct iproc_reqctx_s *rctx)
 
 	/* AES hashing keeps key size in type field, so need to copy it here */
 	if (hash_parms.alg == HASH_ALG_AES)
-		hash_parms.type = cipher_parms.type;
+		hash_parms.type = (enum hash_type)cipher_parms.type;
 	else
 		hash_parms.type = spu->spu_hash_type(rctx->total_sent);
 
@@ -904,24 +913,10 @@ static int handle_ahash_req(struct iproc_reqctx_s *rctx)
 	if (err)
 		return err;
 
-	err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx], mssg);
-	if (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) {
-		while ((err == -ENOBUFS) && (retry_cnt < SPU_MB_RETRY_MAX)) {
-			/*
-			 * Mailbox queue is full. Since MAY_SLEEP is set, assume
-			 * not in atomic context and we can wait and try again.
-			 */
-			retry_cnt++;
-			usleep_range(MBOX_SLEEP_MIN, MBOX_SLEEP_MAX);
-			err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx],
-						mssg);
-			atomic_inc(&iproc_priv.mb_no_spc);
-		}
-	}
-	if (err < 0) {
-		atomic_inc(&iproc_priv.mb_send_fail);
+	err = mailbox_send_message(mssg, req->base.flags, rctx->chan_idx);
+	if (unlikely(err < 0))
 		return err;
-	}
+
 	return -EINPROGRESS;
 }
 
@@ -1320,7 +1315,6 @@ static int handle_aead_req(struct iproc_reqctx_s *rctx)
 	int assoc_nents = 0;
 	bool incl_icv = false;
 	unsigned int digestsize = ctx->digestsize;
-	int retry_cnt = 0;
 
 	/* number of entries in src and dst sg. Always includes SPU msg header.
 	 */
@@ -1367,11 +1361,11 @@ static int handle_aead_req(struct iproc_reqctx_s *rctx)
 		 * expects AAD to include just SPI and seqno. So
 		 * subtract off the IV len.
 		 */
-		aead_parms.assoc_size -= GCM_ESP_IV_SIZE;
+		aead_parms.assoc_size -= GCM_RFC4106_IV_SIZE;
 
 		if (rctx->is_encrypt) {
 			aead_parms.return_iv = true;
-			aead_parms.ret_iv_len = GCM_ESP_IV_SIZE;
+			aead_parms.ret_iv_len = GCM_RFC4106_IV_SIZE;
 			aead_parms.ret_iv_off = GCM_ESP_SALT_SIZE;
 		}
 	} else {
@@ -1404,7 +1398,7 @@ static int handle_aead_req(struct iproc_reqctx_s *rctx)
 						rctx->iv_ctr_len);
 
 	if (ctx->auth.alg == HASH_ALG_AES)
-		hash_parms.type = ctx->cipher_type;
+		hash_parms.type = (enum hash_type)ctx->cipher_type;
 
 	/* General case AAD padding (CCM and RFC4543 special cases below) */
 	aead_parms.aad_pad_len = spu->spu_gcm_ccm_pad_len(ctx->cipher.mode,
@@ -1558,24 +1552,9 @@ static int handle_aead_req(struct iproc_reqctx_s *rctx)
 	if (err)
 		return err;
 
-	err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx], mssg);
-	if (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) {
-		while ((err == -ENOBUFS) && (retry_cnt < SPU_MB_RETRY_MAX)) {
-			/*
-			 * Mailbox queue is full. Since MAY_SLEEP is set, assume
-			 * not in atomic context and we can wait and try again.
-			 */
-			retry_cnt++;
-			usleep_range(MBOX_SLEEP_MIN, MBOX_SLEEP_MAX);
-			err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx],
-						mssg);
-			atomic_inc(&iproc_priv.mb_no_spc);
-		}
-	}
-	if (err < 0) {
-		atomic_inc(&iproc_priv.mb_send_fail);
+	err = mailbox_send_message(mssg, req->base.flags, rctx->chan_idx);
+	if (unlikely(err < 0))
 		return err;
-	}
 
 	return -EINPROGRESS;
 }
@@ -1685,8 +1664,6 @@ static void spu_rx_callback(struct mbox_client *cl, void *msg)
 	struct spu_hw *spu = &iproc_priv.spu;
 	struct brcm_message *mssg = msg;
 	struct iproc_reqctx_s *rctx;
-	struct iproc_ctx_s *ctx;
-	struct crypto_async_request *areq;
 	int err = 0;
 
 	rctx = mssg->ctx;
@@ -1696,8 +1673,6 @@ static void spu_rx_callback(struct mbox_client *cl, void *msg)
 		err = -EFAULT;
 		goto cb_finish;
 	}
-	areq = rctx->parent;
-	ctx = rctx->ctx;
 
 	/* process the SPU status */
 	err = spu->spu_status_process(rctx->msg_buf.rx_stat);
@@ -1827,24 +1802,13 @@ static int des_setkey(struct crypto_ablkcipher *cipher, const u8 *key,
 		      unsigned int keylen)
 {
 	struct iproc_ctx_s *ctx = crypto_ablkcipher_ctx(cipher);
-	u32 tmp[DES_EXPKEY_WORDS];
+	int err;
 
-	if (keylen == DES_KEY_SIZE) {
-		if (des_ekey(tmp, key) == 0) {
-			if (crypto_ablkcipher_get_flags(cipher) &
-			    CRYPTO_TFM_REQ_WEAK_KEY) {
-				u32 flags = CRYPTO_TFM_RES_WEAK_KEY;
+	err = verify_ablkcipher_des_key(cipher, key);
+	if (err)
+		return err;
 
-				crypto_ablkcipher_set_flags(cipher, flags);
-				return -EINVAL;
-			}
-		}
-
-		ctx->cipher_type = CIPHER_TYPE_DES;
-	} else {
-		crypto_ablkcipher_set_flags(cipher, CRYPTO_TFM_RES_BAD_KEY_LEN);
-		return -EINVAL;
-	}
+	ctx->cipher_type = CIPHER_TYPE_DES;
 	return 0;
 }
 
@@ -1852,22 +1816,13 @@ static int threedes_setkey(struct crypto_ablkcipher *cipher, const u8 *key,
 			   unsigned int keylen)
 {
 	struct iproc_ctx_s *ctx = crypto_ablkcipher_ctx(cipher);
+	int err;
 
-	if (keylen == (DES_KEY_SIZE * 3)) {
-		const u32 *K = (const u32 *)key;
-		u32 flags = CRYPTO_TFM_RES_BAD_KEY_SCHED;
+	err = verify_ablkcipher_des3_key(cipher, key);
+	if (err)
+		return err;
 
-		if (!((K[0] ^ K[2]) | (K[1] ^ K[3])) ||
-		    !((K[2] ^ K[4]) | (K[3] ^ K[5]))) {
-			crypto_ablkcipher_set_flags(cipher, flags);
-			return -EINVAL;
-		}
-
-		ctx->cipher_type = CIPHER_TYPE_3DES;
-	} else {
-		crypto_ablkcipher_set_flags(cipher, CRYPTO_TFM_RES_BAD_KEY_LEN);
-		return -EINVAL;
-	}
+	ctx->cipher_type = CIPHER_TYPE_3DES;
 	return 0;
 }
 
@@ -2107,7 +2062,7 @@ static int __ahash_init(struct ahash_request *req)
  * Return: true if incremental hashing is not supported
  *         false otherwise
  */
-bool spu_no_incr_hash(struct iproc_ctx_s *ctx)
+static bool spu_no_incr_hash(struct iproc_ctx_s *ctx)
 {
 	struct spu_hw *spu = &iproc_priv.spu;
 
@@ -2153,7 +2108,6 @@ static int ahash_init(struct ahash_request *req)
 			goto err_hash;
 		}
 		ctx->shash->tfm = hash;
-		ctx->shash->flags = 0;
 
 		/* Set the key using data we already have from setkey */
 		if (ctx->authkeylen > 0) {
@@ -2654,6 +2608,19 @@ static int aead_need_fallback(struct aead_request *req)
 		return 1;
 	}
 
+	/*
+	 * RFC4106 and RFC4543 cannot handle the case where AAD is other than
+	 * 16 or 20 bytes long. So use fallback in this case.
+	 */
+	if (ctx->cipher.mode == CIPHER_MODE_GCM &&
+	    ctx->cipher.alg == CIPHER_ALG_AES &&
+	    rctx->iv_ctr_len == GCM_RFC4106_IV_SIZE &&
+	    req->assoclen != 16 && req->assoclen != 20) {
+		flow_log("RFC4106/RFC4543 needs fallback for assoclen"
+			 " other than 16 or 20 bytes\n");
+		return 1;
+	}
+
 	payload_len = req->cryptlen;
 	if (spu->spu_type == SPU_TYPE_SPUM)
 		payload_len += req->assoclen;
@@ -2855,81 +2822,41 @@ static int aead_authenc_setkey(struct crypto_aead *cipher,
 	struct spu_hw *spu = &iproc_priv.spu;
 	struct iproc_ctx_s *ctx = crypto_aead_ctx(cipher);
 	struct crypto_tfm *tfm = crypto_aead_tfm(cipher);
-	struct rtattr *rta = (void *)key;
-	struct crypto_authenc_key_param *param;
-	const u8 *origkey = key;
-	const unsigned int origkeylen = keylen;
-
-	int ret = 0;
+	struct crypto_authenc_keys keys;
+	int ret;
 
 	flow_log("%s() aead:%p key:%p keylen:%u\n", __func__, cipher, key,
 		 keylen);
 	flow_dump("  key: ", key, keylen);
 
-	if (!RTA_OK(rta, keylen))
-		goto badkey;
-	if (rta->rta_type != CRYPTO_AUTHENC_KEYA_PARAM)
-		goto badkey;
-	if (RTA_PAYLOAD(rta) < sizeof(*param))
+	ret = crypto_authenc_extractkeys(&keys, key, keylen);
+	if (ret)
 		goto badkey;
 
-	param = RTA_DATA(rta);
-	ctx->enckeylen = be32_to_cpu(param->enckeylen);
-
-	key += RTA_ALIGN(rta->rta_len);
-	keylen -= RTA_ALIGN(rta->rta_len);
-
-	if (keylen < ctx->enckeylen)
-		goto badkey;
-	if (ctx->enckeylen > MAX_KEY_SIZE)
+	if (keys.enckeylen > MAX_KEY_SIZE ||
+	    keys.authkeylen > MAX_KEY_SIZE)
 		goto badkey;
 
-	ctx->authkeylen = keylen - ctx->enckeylen;
+	ctx->enckeylen = keys.enckeylen;
+	ctx->authkeylen = keys.authkeylen;
 
-	if (ctx->authkeylen > MAX_KEY_SIZE)
-		goto badkey;
-
-	memcpy(ctx->enckey, key + ctx->authkeylen, ctx->enckeylen);
+	memcpy(ctx->enckey, keys.enckey, keys.enckeylen);
 	/* May end up padding auth key. So make sure it's zeroed. */
 	memset(ctx->authkey, 0, sizeof(ctx->authkey));
-	memcpy(ctx->authkey, key, ctx->authkeylen);
+	memcpy(ctx->authkey, keys.authkey, keys.authkeylen);
 
 	switch (ctx->alg->cipher_info.alg) {
 	case CIPHER_ALG_DES:
-		if (ctx->enckeylen == DES_KEY_SIZE) {
-			u32 tmp[DES_EXPKEY_WORDS];
-			u32 flags = CRYPTO_TFM_RES_WEAK_KEY;
+		if (verify_aead_des_key(cipher, keys.enckey, keys.enckeylen))
+			return -EINVAL;
 
-			if (des_ekey(tmp, key) == 0) {
-				if (crypto_aead_get_flags(cipher) &
-				    CRYPTO_TFM_REQ_WEAK_KEY) {
-					crypto_aead_set_flags(cipher, flags);
-					return -EINVAL;
-				}
-			}
-
-			ctx->cipher_type = CIPHER_TYPE_DES;
-		} else {
-			goto badkey;
-		}
+		ctx->cipher_type = CIPHER_TYPE_DES;
 		break;
 	case CIPHER_ALG_3DES:
-		if (ctx->enckeylen == (DES_KEY_SIZE * 3)) {
-			const u32 *K = (const u32 *)key;
-			u32 flags = CRYPTO_TFM_RES_BAD_KEY_SCHED;
-
-			if (!((K[0] ^ K[2]) | (K[1] ^ K[3])) ||
-			    !((K[2] ^ K[4]) | (K[3] ^ K[5]))) {
-				crypto_aead_set_flags(cipher, flags);
-				return -EINVAL;
-			}
-
-			ctx->cipher_type = CIPHER_TYPE_3DES;
-		} else {
-			crypto_aead_set_flags(cipher,
-					      CRYPTO_TFM_RES_BAD_KEY_LEN);
+		if (verify_aead_des3_key(cipher, keys.enckey, keys.enckeylen))
 			return -EINVAL;
-		}
+
+		ctx->cipher_type = CIPHER_TYPE_3DES;
 		break;
 	case CIPHER_ALG_AES:
 		switch (ctx->enckeylen) {
@@ -2966,9 +2893,7 @@ static int aead_authenc_setkey(struct crypto_aead *cipher,
 		ctx->fallback_cipher->base.crt_flags &= ~CRYPTO_TFM_REQ_MASK;
 		ctx->fallback_cipher->base.crt_flags |=
 		    tfm->crt_flags & CRYPTO_TFM_REQ_MASK;
-		ret =
-		    crypto_aead_setkey(ctx->fallback_cipher, origkey,
-				       origkeylen);
+		ret = crypto_aead_setkey(ctx->fallback_cipher, key, keylen);
 		if (ret) {
 			flow_log("  fallback setkey() returned:%d\n", ret);
 			tfm->crt_flags &= ~CRYPTO_TFM_RES_MASK;
@@ -3255,7 +3180,7 @@ static struct iproc_alg_s driver_algs[] = {
 			.cra_flags = CRYPTO_ALG_NEED_FALLBACK
 		 },
 		 .setkey = aead_gcm_esp_setkey,
-		 .ivsize = GCM_ESP_IV_SIZE,
+		 .ivsize = GCM_RFC4106_IV_SIZE,
 		 .maxauthsize = AES_BLOCK_SIZE,
 	 },
 	 .cipher_info = {
@@ -3301,7 +3226,7 @@ static struct iproc_alg_s driver_algs[] = {
 			.cra_flags = CRYPTO_ALG_NEED_FALLBACK
 		 },
 		 .setkey = rfc4543_gcm_esp_setkey,
-		 .ivsize = GCM_ESP_IV_SIZE,
+		 .ivsize = GCM_RFC4106_IV_SIZE,
 		 .maxauthsize = AES_BLOCK_SIZE,
 	 },
 	 .cipher_info = {
@@ -3878,7 +3803,6 @@ static struct iproc_alg_s driver_algs[] = {
 			.cra_driver_name = "ctr-aes-iproc",
 			.cra_blocksize = AES_BLOCK_SIZE,
 			.cra_ablkcipher = {
-					   /* .geniv = "chainiv", */
 					   .min_keysize = AES_MIN_KEY_SIZE,
 					   .max_keysize = AES_MAX_KEY_SIZE,
 					   .ivsize = AES_BLOCK_SIZE,
@@ -3924,8 +3848,7 @@ static struct iproc_alg_s driver_algs[] = {
 				    .cra_name = "md5",
 				    .cra_driver_name = "md5-iproc",
 				    .cra_blocksize = MD5_BLOCK_WORDS * 4,
-				    .cra_flags = CRYPTO_ALG_TYPE_AHASH |
-					     CRYPTO_ALG_ASYNC,
+				    .cra_flags = CRYPTO_ALG_ASYNC,
 				}
 		      },
 	 .cipher_info = {
@@ -4537,7 +4460,7 @@ static int spu_mb_init(struct device *dev)
 	mcl->dev = dev;
 	mcl->tx_block = false;
 	mcl->tx_tout = 0;
-	mcl->knows_txdone = false;
+	mcl->knows_txdone = true;
 	mcl->rx_callback = spu_rx_callback;
 	mcl->tx_done = NULL;
 
@@ -4616,7 +4539,6 @@ static int spu_register_ablkcipher(struct iproc_alg_s *driver_alg)
 	crypto->cra_priority = cipher_pri;
 	crypto->cra_alignmask = 0;
 	crypto->cra_ctxsize = sizeof(struct iproc_ctx_s);
-	INIT_LIST_HEAD(&crypto->cra_list);
 
 	crypto->cra_init = ablkcipher_cra_init;
 	crypto->cra_exit = generic_cra_exit;
@@ -4659,17 +4581,20 @@ static int spu_register_ahash(struct iproc_alg_s *driver_alg)
 	hash->halg.base.cra_ctxsize = sizeof(struct iproc_ctx_s);
 	hash->halg.base.cra_init = ahash_cra_init;
 	hash->halg.base.cra_exit = generic_cra_exit;
-	hash->halg.base.cra_type = &crypto_ahash_type;
-	hash->halg.base.cra_flags = CRYPTO_ALG_TYPE_AHASH | CRYPTO_ALG_ASYNC;
+	hash->halg.base.cra_flags = CRYPTO_ALG_ASYNC;
 	hash->halg.statesize = sizeof(struct spu_hash_export_s);
 
 	if (driver_alg->auth_info.mode != HASH_MODE_HMAC) {
-		hash->setkey = ahash_setkey;
 		hash->init = ahash_init;
 		hash->update = ahash_update;
 		hash->final = ahash_final;
 		hash->finup = ahash_finup;
 		hash->digest = ahash_digest;
+		if ((driver_alg->auth_info.alg == HASH_ALG_AES) &&
+		    ((driver_alg->auth_info.mode == HASH_MODE_XCBC) ||
+		    (driver_alg->auth_info.mode == HASH_MODE_CMAC))) {
+			hash->setkey = ahash_setkey;
+		}
 	} else {
 		hash->setkey = ahash_hmac_setkey;
 		hash->init = ahash_hmac_init;
@@ -4699,9 +4624,8 @@ static int spu_register_aead(struct iproc_alg_s *driver_alg)
 	aead->base.cra_priority = aead_pri;
 	aead->base.cra_alignmask = 0;
 	aead->base.cra_ctxsize = sizeof(struct iproc_ctx_s);
-	INIT_LIST_HEAD(&aead->base.cra_list);
 
-	aead->base.cra_flags |= CRYPTO_ALG_TYPE_AEAD | CRYPTO_ALG_ASYNC;
+	aead->base.cra_flags |= CRYPTO_ALG_ASYNC;
 	/* setkey set in alg initialization */
 	aead->setauthsize = aead_setauthsize;
 	aead->encrypt = aead_encrypt;
@@ -4818,7 +4742,6 @@ static int spu_dt_read(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct spu_hw *spu = &iproc_priv.spu;
 	struct resource *spu_ctrl_regs;
-	const struct of_device_id *match;
 	const struct spu_type_subtype *matched_spu_type;
 	struct device_node *dn = pdev->dev.of_node;
 	int err, i;
@@ -4826,13 +4749,11 @@ static int spu_dt_read(struct platform_device *pdev)
 	/* Count number of mailbox channels */
 	spu->num_chan = of_count_phandle_with_args(dn, "mboxes", "#mbox-cells");
 
-	match = of_match_device(of_match_ptr(bcm_spu_dt_ids), dev);
-	if (!match) {
+	matched_spu_type = of_device_get_match_data(dev);
+	if (!matched_spu_type) {
 		dev_err(&pdev->dev, "Failed to match device\n");
 		return -ENODEV;
 	}
-
-	matched_spu_type = match->data;
 
 	spu->spu_type = matched_spu_type->type;
 	spu->spu_subtype = matched_spu_type->subtype;
@@ -4856,7 +4777,7 @@ static int spu_dt_read(struct platform_device *pdev)
 	return 0;
 }
 
-int bcm_spu_probe(struct platform_device *pdev)
+static int bcm_spu_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct spu_hw *spu = &iproc_priv.spu;
@@ -4900,7 +4821,7 @@ failure:
 	return err;
 }
 
-int bcm_spu_remove(struct platform_device *pdev)
+static int bcm_spu_remove(struct platform_device *pdev)
 {
 	int i;
 	struct device *dev = &pdev->dev;

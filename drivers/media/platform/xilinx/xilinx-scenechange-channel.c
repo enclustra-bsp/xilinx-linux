@@ -8,23 +8,11 @@
  *          Satish Kumar Nagireddy <satish.nagireddy.nagireddy@xilinx.com>
  */
 
-#include <linux/clk.h>
-#include <linux/delay.h>
-#include <linux/dmaengine.h>
-#include <linux/module.h>
 #include <linux/gpio/consumer.h>
-#include <linux/interrupt.h>
-#include <linux/kernel.h>
-#include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_irq.h>
-#include <linux/platform_device.h>
-#include <linux/slab.h>
-#include <linux/xilinx-v4l2-controls.h>
 #include <linux/xilinx-v4l2-events.h>
+
 #include <media/v4l2-async.h>
-#include <media/v4l2-ctrls.h>
-#include <media/v4l2-device.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-subdev.h>
 
@@ -36,25 +24,9 @@
 #define XSCD_MIN_WIDTH		640
 #define XSCD_MIN_HEIGHT		480
 
-#define XSCD_WIDTH_OFFSET		0x10
-#define XSCD_HEIGHT_OFFSET		0x18
-#define XSCD_STRIDE_OFFSET		0x20
-#define XSCD_VID_FMT_OFFSET		0x28
-#define XSCD_SUBSAMPLE_OFFSET		0x30
-#define XSCD_SAD_OFFSET			0x38
-
-/* Hardware video formats for memory based IP */
-#define XSCD_COLOR_FMT_Y8		24
-#define XSCD_COLOR_FMT_Y10		25
-
-/* Hardware video formats for streaming based IP */
-#define XSCD_COLOR_FMT_RGB		0
-#define XSCD_COLOR_FMT_YUV_444		1
-#define XSCD_COLOR_FMT_YUV_422		2
-#define XSCD_COLOR_FMT_YUV_420		4
-
 #define XSCD_V_SUBSAMPLING		16
 #define XSCD_BYTE_ALIGN			16
+#define MULTIPLICATION_FACTOR		100
 
 #define XSCD_SCENE_CHANGE		1
 #define XSCD_NO_SCENE_CHANGE		0
@@ -97,7 +69,7 @@ static int xscd_get_format(struct v4l2_subdev *subdev,
 			   struct v4l2_subdev_pad_config *cfg,
 			   struct v4l2_subdev_format *fmt)
 {
-	struct xscd_chan *chan = to_chan(subdev);
+	struct xscd_chan *chan = to_xscd_chan(subdev);
 
 	fmt->format = *__xscd_get_pad_format(chan, cfg, fmt->pad, fmt->which);
 	return 0;
@@ -107,7 +79,7 @@ static int xscd_set_format(struct v4l2_subdev *subdev,
 			   struct v4l2_subdev_pad_config *cfg,
 			   struct v4l2_subdev_format *fmt)
 {
-	struct xscd_chan *chan = to_chan(subdev);
+	struct xscd_chan *chan = to_xscd_chan(subdev);
 	struct v4l2_mbus_framefmt *format;
 
 	format = __xscd_get_pad_format(chan, cfg, fmt->pad, fmt->which);
@@ -115,6 +87,7 @@ static int xscd_set_format(struct v4l2_subdev *subdev,
 				XSCD_MIN_WIDTH, XSCD_MAX_WIDTH);
 	format->height = clamp_t(unsigned int, fmt->format.height,
 				 XSCD_MIN_HEIGHT, XSCD_MAX_HEIGHT);
+	format->code = fmt->format.code;
 	fmt->format = *format;
 
 	return 0;
@@ -122,115 +95,124 @@ static int xscd_set_format(struct v4l2_subdev *subdev,
 
 static int xscd_chan_get_vid_fmt(u32 media_bus_fmt, bool memory_based)
 {
-	/*
-	 * FIXME: We have same media bus codes for both 8bit and 10bit pixel
-	 * formats. So, there is no way to differentiate between 8bit and 10bit
-	 * formats based on media bus code. This will be fixed when we have
-	 * dedicated media bus code for each format.
-	 */
-	if (memory_based)
-		return XSCD_COLOR_FMT_Y8;
+	u32 vid_fmt;
 
+	if (memory_based) {
+		switch (media_bus_fmt) {
+		case MEDIA_BUS_FMT_VYYUYY8_1X24:
+		case MEDIA_BUS_FMT_UYVY8_1X16:
+		case MEDIA_BUS_FMT_VUY8_1X24:
+			vid_fmt = XSCD_VID_FMT_Y8;
+			break;
+		case MEDIA_BUS_FMT_VYYUYY10_4X20:
+		case MEDIA_BUS_FMT_UYVY10_1X20:
+		case MEDIA_BUS_FMT_VUY10_1X30:
+			vid_fmt = XSCD_VID_FMT_Y10;
+			break;
+		default:
+			vid_fmt = XSCD_VID_FMT_Y8;
+		}
+
+		return vid_fmt;
+	}
+
+	/* Streaming based */
 	switch (media_bus_fmt) {
 	case MEDIA_BUS_FMT_VYYUYY8_1X24:
-		return XSCD_COLOR_FMT_YUV_420;
+	case MEDIA_BUS_FMT_VYYUYY10_4X20:
+		vid_fmt = XSCD_VID_FMT_YUV_420;
+		break;
 	case MEDIA_BUS_FMT_UYVY8_1X16:
-		return XSCD_COLOR_FMT_YUV_422;
+	case MEDIA_BUS_FMT_UYVY10_1X20:
+		vid_fmt = XSCD_VID_FMT_YUV_422;
+		break;
 	case MEDIA_BUS_FMT_VUY8_1X24:
-		return XSCD_COLOR_FMT_YUV_444;
+	case MEDIA_BUS_FMT_VUY10_1X30:
+		vid_fmt = XSCD_VID_FMT_YUV_444;
+		break;
 	case MEDIA_BUS_FMT_RBG888_1X24:
-		return XSCD_COLOR_FMT_RGB;
+	case MEDIA_BUS_FMT_RBG101010_1X30:
+		vid_fmt = XSCD_VID_FMT_RGB;
+		break;
 	default:
-		return XSCD_COLOR_FMT_YUV_420;
+		vid_fmt = XSCD_VID_FMT_YUV_420;
 	}
+
+	return vid_fmt;
 }
 
 /**
  * xscd_chan_configure_params - Program parameters to HW registers
  * @chan: Driver specific channel struct pointer
- * @shared_data: Shared data
- * @chan_offset: Register offset for a channel
  */
-void xscd_chan_configure_params(struct xscd_chan *chan,
-				struct xscd_shared_data *shared_data,
-				u32 chan_offset)
+static void xscd_chan_configure_params(struct xscd_chan *chan)
 {
 	u32 vid_fmt, stride;
 
-	xscd_write(chan->iomem, XSCD_WIDTH_OFFSET + chan_offset,
-		   chan->format.width);
+	xscd_write(chan->iomem, XSCD_WIDTH_OFFSET, chan->format.width);
 
 	/* Stride is required only for memory based IP, not for streaming IP */
-	if (shared_data->memory_based) {
+	if (chan->xscd->memory_based) {
 		stride = roundup(chan->format.width, XSCD_BYTE_ALIGN);
-		xscd_write(chan->iomem, XSCD_STRIDE_OFFSET + chan_offset,
-			   stride);
+		xscd_write(chan->iomem, XSCD_STRIDE_OFFSET, stride);
 	}
 
-	xscd_write(chan->iomem, XSCD_HEIGHT_OFFSET + chan_offset,
-		   chan->format.height);
+	xscd_write(chan->iomem, XSCD_HEIGHT_OFFSET, chan->format.height);
 
 	/* Hardware video format */
 	vid_fmt = xscd_chan_get_vid_fmt(chan->format.code,
-					shared_data->memory_based);
-	xscd_write(chan->iomem, XSCD_VID_FMT_OFFSET + chan_offset, vid_fmt);
+					chan->xscd->memory_based);
+	xscd_write(chan->iomem, XSCD_VID_FMT_OFFSET, vid_fmt);
 
 	/*
 	 * This is the vertical subsampling factor of the input image. Instead
 	 * of sampling every line to calculate the histogram, IP uses this
 	 * register value to sample only specific lines of the frame.
 	 */
-	xscd_write(chan->iomem, XSCD_SUBSAMPLE_OFFSET + chan_offset,
-		   XSCD_V_SUBSAMPLING);
+	xscd_write(chan->iomem, XSCD_SUBSAMPLE_OFFSET, XSCD_V_SUBSAMPLING);
 }
 
 /* -----------------------------------------------------------------------------
  * V4L2 Subdevice Operations
  */
-static int xscd_s_stream(struct v4l2_subdev *subdev, int enable)
+
+static int xscd_s_ctrl(struct v4l2_ctrl *ctrl)
 {
-	struct xscd_chan *chan = to_chan(subdev);
-	struct xscd_shared_data *shared_data;
-	unsigned long flags;
-	u32 chan_offset;
+	int ret = 0;
+	struct xscd_chan *chan = container_of(ctrl->handler, struct xscd_chan,
+					      ctrl_handler);
 
-	/* TODO: Re-organise shared data in a better way */
-	shared_data = (struct xscd_shared_data *)chan->dev->parent->driver_data;
-	chan->dmachan.en = enable;
-
-	spin_lock_irqsave(&chan->dmachan.lock, flags);
-
-	if (shared_data->memory_based) {
-		chan_offset = chan->id * XILINX_XSCD_CHAN_OFFSET;
-		xscd_chan_configure_params(chan, shared_data, chan_offset);
-		if (enable) {
-			if (!shared_data->active_streams) {
-				chan->dmachan.valid_interrupt = true;
-				shared_data->active_streams++;
-				xscd_dma_start_transfer(&chan->dmachan);
-				xscd_dma_reset(&chan->dmachan);
-				xscd_dma_chan_enable(&chan->dmachan,
-						     BIT(chan->id));
-				xscd_dma_start(&chan->dmachan);
-			} else {
-				shared_data->active_streams++;
-			}
-		} else {
-			shared_data->active_streams--;
-		}
-	} else {
-		/* Streaming based */
-		if (enable) {
-			xscd_chan_configure_params(chan, shared_data, chan->id);
-			xscd_dma_reset(&chan->dmachan);
-			xscd_dma_chan_enable(&chan->dmachan, BIT(chan->id));
-			xscd_dma_start(&chan->dmachan);
-		} else {
-			xscd_dma_halt(&chan->dmachan);
-		}
+	switch (ctrl->id) {
+	case V4L2_CID_XILINX_SCD_THRESHOLD:
+		chan->threshold = ctrl->val;
+		break;
+	default:
+		ret = -EINVAL;
+		break;
 	}
 
-	spin_unlock_irqrestore(&chan->dmachan.lock, flags);
+	return ret;
+}
+
+static int xscd_s_stream(struct v4l2_subdev *subdev, int enable)
+{
+	struct xscd_chan *chan = to_xscd_chan(subdev);
+	struct xscd_device *xscd = chan->xscd;
+
+	if (enable)
+		xscd_chan_configure_params(chan);
+
+	xscd_dma_enable_channel(&chan->dmachan, enable);
+
+	/*
+	 * Resolution change doesn't work in stream based mode unless
+	 * the device is reset.
+	 */
+	if (!enable && !xscd->memory_based) {
+		gpiod_set_value_cansleep(xscd->rst_gpio, XSCD_RESET_ASSERT);
+		gpiod_set_value_cansleep(xscd->rst_gpio, XSCD_RESET_DEASSERT);
+	}
+
 	return 0;
 }
 
@@ -239,7 +221,7 @@ static int xscd_subscribe_event(struct v4l2_subdev *sd,
 				struct v4l2_event_subscription *sub)
 {
 	int ret;
-	struct xscd_chan *chan = to_chan(sd);
+	struct xscd_chan *chan = to_xscd_chan(sd);
 
 	mutex_lock(&chan->lock);
 
@@ -261,7 +243,7 @@ static int xscd_unsubscribe_event(struct v4l2_subdev *sd,
 				  struct v4l2_event_subscription *sub)
 {
 	int ret;
-	struct xscd_chan *chan = to_chan(sd);
+	struct xscd_chan *chan = to_xscd_chan(sd);
 
 	mutex_lock(&chan->lock);
 	ret = v4l2_event_unsubscribe(fh, sub);
@@ -279,6 +261,23 @@ static int xscd_close(struct v4l2_subdev *subdev, struct v4l2_subdev_fh *fh)
 {
 	return 0;
 }
+
+static const struct v4l2_ctrl_ops xscd_ctrl_ops = {
+	.s_ctrl	= xscd_s_ctrl
+};
+
+static const struct v4l2_ctrl_config xscd_ctrls[] = {
+	{
+		.ops = &xscd_ctrl_ops,
+		.id = V4L2_CID_XILINX_SCD_THRESHOLD,
+		.name = "Threshold Value",
+		.type = V4L2_CTRL_TYPE_INTEGER,
+		.min = 0,
+		.max = 100,
+		.step = 1,
+		.def = 50,
+	}
+};
 
 static const struct v4l2_subdev_core_ops xscd_core_ops = {
 	.subscribe_event = xscd_subscribe_event,
@@ -315,17 +314,17 @@ static const struct media_entity_operations xscd_media_ops = {
 	.link_validate = v4l2_subdev_link_validate,
 };
 
-static void xscd_event_notify(struct xscd_chan *chan)
+void xscd_chan_event_notify(struct xscd_chan *chan)
 {
 	u32 *eventdata;
 	u32 sad;
 
-	sad = xscd_read(chan->iomem, XSCD_SAD_OFFSET +
-			(chan->id * XILINX_XSCD_CHAN_OFFSET));
-	sad = (sad * 16) / (chan->format.width * chan->format.height);
+	sad = xscd_read(chan->iomem, XSCD_SAD_OFFSET);
+	sad = (sad * XSCD_V_SUBSAMPLING * MULTIPLICATION_FACTOR) /
+	       (chan->format.width * chan->format.height);
 	eventdata = (u32 *)&chan->event.u.data;
 
-	if (sad >= 1)
+	if (sad > chan->threshold)
 		eventdata[0] = XSCD_SCENE_CHANGE;
 	else
 		eventdata[0] = XSCD_NO_SCENE_CHANGE;
@@ -334,87 +333,36 @@ static void xscd_event_notify(struct xscd_chan *chan)
 	v4l2_subdev_notify_event(&chan->subdev, &chan->event);
 }
 
-static irqreturn_t xscd_chan_irq_handler(int irq, void *data)
-{
-	struct xscd_chan *chan = (struct xscd_chan *)data;
-	struct xscd_shared_data *shared_data;
-
-	shared_data = (struct xscd_shared_data *)chan->dev->parent->driver_data;
-	spin_lock(&chan->dmachan.lock);
-
-	if ((shared_data->memory_based && chan->dmachan.valid_interrupt) ||
-	    !shared_data->memory_based) {
-		spin_unlock(&chan->dmachan.lock);
-		xscd_event_notify(chan);
-		return IRQ_HANDLED;
-	}
-
-	spin_unlock(&chan->dmachan.lock);
-	return IRQ_NONE;
-}
-
-static int xscd_chan_parse_of(struct xscd_chan *chan)
-{
-	struct device_node *parent_node;
-	struct xscd_shared_data *shared_data;
-	int err;
-
-	parent_node = chan->dev->parent->of_node;
-	shared_data = (struct xscd_shared_data *)chan->dev->parent->driver_data;
-	shared_data->dma_chan_list[chan->id] = &chan->dmachan;
-	chan->iomem = shared_data->iomem;
-
-	chan->irq = irq_of_parse_and_map(parent_node, 0);
-	if (!chan->irq) {
-		dev_err(chan->dev, "No valid irq found\n");
-		return -EINVAL;
-	}
-
-	err = devm_request_irq(chan->dev, chan->irq, xscd_chan_irq_handler,
-			       IRQF_SHARED, dev_name(chan->dev), chan);
-	if (err) {
-		dev_err(chan->dev, "unable to request IRQ %d\n", chan->irq);
-		return err;
-	}
-
-	chan->dmachan.iomem = shared_data->iomem;
-	chan->dmachan.id = chan->id;
-
-	return 0;
-}
-
 /**
- * xscd_chan_probe - Driver probe function
- * @pdev: Pointer to the device structure
+ * xscd_chan_init - Initialize the V4L2 subdev for a channel
+ * @xscd: Pointer to the SCD device structure
+ * @chan_id: Channel id
+ * @node: device node
  *
  * Return: '0' on success and failure value on error
  */
-static int xscd_chan_probe(struct platform_device *pdev)
+int xscd_chan_init(struct xscd_device *xscd, unsigned int chan_id,
+		   struct device_node *node)
 {
-	struct xscd_chan *chan;
+	struct xscd_chan *chan = &xscd->chans[chan_id];
 	struct v4l2_subdev *subdev;
-	struct xscd_shared_data *shared_data;
+	unsigned int num_pads;
 	int ret;
-	u32 num_pads;
-
-	shared_data = (struct xscd_shared_data *)pdev->dev.parent->driver_data;
-	chan = devm_kzalloc(&pdev->dev, sizeof(*chan), GFP_KERNEL);
-	if (!chan)
-		return -ENOMEM;
+	unsigned int i;
 
 	mutex_init(&chan->lock);
-	chan->dev = &pdev->dev;
-	chan->id = pdev->id;
-	ret = xscd_chan_parse_of(chan);
-	if (ret < 0)
-		return ret;
+	chan->xscd = xscd;
+	chan->id = chan_id;
+	chan->iomem = chan->xscd->iomem + chan->id * XSCD_CHAN_OFFSET;
 
 	/* Initialize V4L2 subdevice and media entity */
 	subdev = &chan->subdev;
 	v4l2_subdev_init(subdev, &xscd_ops);
-	subdev->dev = &pdev->dev;
+	subdev->dev = chan->xscd->dev;
+	subdev->fwnode = of_fwnode_handle(node);
 	subdev->internal_ops = &xscd_internal_ops;
-	strlcpy(subdev->name, dev_name(&pdev->dev), sizeof(subdev->name));
+	snprintf(subdev->name, sizeof(subdev->name), "xlnx-scdchan.%u",
+		 chan_id);
 	v4l2_set_subdevdata(subdev, chan);
 	subdev->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE | V4L2_SUBDEV_FL_HAS_EVENTS;
 
@@ -425,63 +373,80 @@ static int xscd_chan_probe(struct platform_device *pdev)
 	chan->format.height = XSCD_MAX_HEIGHT;
 
 	/* Initialize media pads */
-	num_pads = shared_data->memory_based ? 1 : 2;
-	chan->pad = devm_kzalloc(&pdev->dev,
-				 sizeof(struct media_pad) * num_pads,
-				 GFP_KERNEL);
-	if (!chan->pad)
-		return -ENOMEM;
+	num_pads = xscd->memory_based ? 1 : 2;
 
-	chan->pad[XVIP_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
-	if (!shared_data->memory_based)
-		chan->pad[XVIP_PAD_SOURCE].flags = MEDIA_PAD_FL_SOURCE;
+	chan->pads[XVIP_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
+	if (!xscd->memory_based)
+		chan->pads[XVIP_PAD_SOURCE].flags = MEDIA_PAD_FL_SOURCE;
 
-	ret = media_entity_pads_init(&subdev->entity, num_pads, chan->pad);
+	ret = media_entity_pads_init(&subdev->entity, num_pads, chan->pads);
 	if (ret < 0)
-		goto error;
+		goto media_init_error;
 
 	subdev->entity.ops = &xscd_media_ops;
-	ret = v4l2_async_register_subdev(subdev);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "failed to register subdev\n");
-		goto error;
+
+	/* Initialize V4L2 Control Handler */
+	v4l2_ctrl_handler_init(&chan->ctrl_handler, ARRAY_SIZE(xscd_ctrls));
+
+	for (i = 0; i < ARRAY_SIZE(xscd_ctrls); i++) {
+		struct v4l2_ctrl *ctrl;
+
+		dev_dbg(chan->xscd->dev, "%d ctrl = 0x%x\n", i,
+			xscd_ctrls[i].id);
+		ctrl = v4l2_ctrl_new_custom(&chan->ctrl_handler, &xscd_ctrls[i],
+					    NULL);
+		if (!ctrl) {
+			dev_err(chan->xscd->dev, "Failed for %s ctrl\n",
+				xscd_ctrls[i].name);
+			goto ctrl_handler_error;
+		}
 	}
 
-	dev_info(chan->dev, "Scene change detection channel found!\n");
+	if (chan->ctrl_handler.error) {
+		dev_err(chan->xscd->dev, "failed to add controls\n");
+		ret = chan->ctrl_handler.error;
+		goto ctrl_handler_error;
+	}
+
+	subdev->ctrl_handler = &chan->ctrl_handler;
+
+	ret = v4l2_ctrl_handler_setup(&chan->ctrl_handler);
+	if (ret < 0) {
+		dev_err(chan->xscd->dev, "failed to set controls\n");
+		goto ctrl_handler_error;
+	}
+
+	ret = v4l2_async_register_subdev(subdev);
+	if (ret < 0) {
+		dev_err(chan->xscd->dev, "failed to register subdev\n");
+		goto ctrl_handler_error;
+	}
+
+	dev_info(chan->xscd->dev, "Scene change detection channel found!\n");
 	return 0;
 
-error:
+ctrl_handler_error:
+	v4l2_ctrl_handler_free(&chan->ctrl_handler);
+media_init_error:
 	media_entity_cleanup(&subdev->entity);
+	mutex_destroy(&chan->lock);
 	return ret;
 }
 
-static int xscd_chan_remove(struct platform_device *pdev)
+/**
+ * xscd_chan_cleanup - Clean up the V4L2 subdev for a channel
+ * @xscd: Pointer to the SCD device structure
+ * @chan_id: Channel id
+ * @node: device node
+ */
+void xscd_chan_cleanup(struct xscd_device *xscd, unsigned int chan_id,
+		       struct device_node *node)
 {
-	return 0;
+	struct xscd_chan *chan = &xscd->chans[chan_id];
+	struct v4l2_subdev *subdev = &chan->subdev;
+
+	v4l2_async_unregister_subdev(subdev);
+	v4l2_ctrl_handler_free(&chan->ctrl_handler);
+	media_entity_cleanup(&subdev->entity);
+	mutex_destroy(&chan->lock);
 }
-
-static struct platform_driver xscd_chan_driver = {
-	.probe		= xscd_chan_probe,
-	.remove		= xscd_chan_remove,
-	.driver		= {
-		.name	= "xlnx-scdchan",
-	},
-};
-
-static int __init xscd_chan_init(void)
-{
-	platform_driver_register(&xscd_chan_driver);
-	return 0;
-}
-
-static void __exit xscd_chan_exit(void)
-{
-	platform_driver_unregister(&xscd_chan_driver);
-}
-
-module_init(xscd_chan_init);
-module_exit(xscd_chan_exit);
-
-MODULE_AUTHOR("Xilinx Inc.");
-MODULE_DESCRIPTION("Xilinx Scene Change Detection");
-MODULE_LICENSE("GPL v2");

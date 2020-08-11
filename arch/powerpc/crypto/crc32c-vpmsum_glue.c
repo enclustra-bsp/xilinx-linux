@@ -1,10 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/crc32.h>
 #include <crypto/internal/hash.h>
+#include <crypto/internal/simd.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/cpufeature.h>
+#include <asm/simd.h>
 #include <asm/switch_to.h>
 
 #define CHKSUM_BLOCK_SIZE	1
@@ -22,7 +25,7 @@ static u32 crc32c_vpmsum(u32 crc, unsigned char const *p, size_t len)
 	unsigned int prealign;
 	unsigned int tail;
 
-	if (len < (VECTOR_BREAKPOINT + VMX_ALIGN) || in_interrupt())
+	if (len < (VECTOR_BREAKPOINT + VMX_ALIGN) || !crypto_simd_usable())
 		return __crc32c_le(crc, p, len);
 
 	if ((unsigned long)p & VMX_ALIGN_MASK) {
@@ -141,6 +144,7 @@ static struct shash_alg alg = {
 		.cra_name		= "crc32c",
 		.cra_driver_name	= "crc32c-vpmsum",
 		.cra_priority		= 200,
+		.cra_flags		= CRYPTO_ALG_OPTIONAL_KEY,
 		.cra_blocksize		= CHKSUM_BLOCK_SIZE,
 		.cra_ctxsize		= sizeof(u32),
 		.cra_module		= THIS_MODULE,

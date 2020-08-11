@@ -178,6 +178,7 @@ static struct bus_type sunxi_rsb_bus = {
 	.match		= sunxi_rsb_device_match,
 	.probe		= sunxi_rsb_device_probe,
 	.remove		= sunxi_rsb_device_remove,
+	.uevent		= of_device_uevent_modalias,
 };
 
 static void sunxi_rsb_dev_release(struct device *dev)
@@ -650,10 +651,8 @@ static int sunxi_rsb_probe(struct platform_device *pdev)
 		return PTR_ERR(rsb->regs);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(dev, "failed to retrieve irq: %d\n", irq);
+	if (irq < 0)
 		return irq;
-	}
 
 	rsb->clk = devm_clk_get(dev, NULL);
 	if (IS_ERR(rsb->clk)) {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2005-2014 Brocade Communications Systems, Inc.
  * Copyright (c) 2014- QLogic Corporation.
@@ -5,15 +6,6 @@
  * www.qlogic.com
  *
  * Linux driver for QLogic BR-series Fibre Channel Host Bus Adapter.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License (GPL) Version 2 as
- * published by the Free Software Foundation
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 
 /*
@@ -70,21 +62,18 @@ bfa_cb_ioim_done(void *drv, struct bfad_ioim_s *dio,
 				host_status = DID_ERROR;
 			}
 		}
-		cmnd->result = ScsiResult(host_status, scsi_status);
+		cmnd->result = host_status << 16 | scsi_status;
 
 		break;
 
 	case BFI_IOIM_STS_TIMEDOUT:
-		host_status = DID_TIME_OUT;
-		cmnd->result = ScsiResult(host_status, 0);
+		cmnd->result = DID_TIME_OUT << 16;
 		break;
 	case BFI_IOIM_STS_PATHTOV:
-		host_status = DID_TRANSPORT_DISRUPTED;
-		cmnd->result = ScsiResult(host_status, 0);
+		cmnd->result = DID_TRANSPORT_DISRUPTED << 16;
 		break;
 	default:
-		host_status = DID_ERROR;
-		cmnd->result = ScsiResult(host_status, 0);
+		cmnd->result = DID_ERROR << 16;
 	}
 
 	/* Unmap DMA, if host is NULL, it means a scsi passthru cmd */
@@ -117,7 +106,7 @@ bfa_cb_ioim_good_comp(void *drv, struct bfad_ioim_s *dio)
 	struct bfad_itnim_data_s *itnim_data;
 	struct bfad_itnim_s *itnim;
 
-	cmnd->result = ScsiResult(DID_OK, SCSI_STATUS_GOOD);
+	cmnd->result = DID_OK << 16 | SCSI_STATUS_GOOD;
 
 	/* Unmap DMA, if host is NULL, it means a scsi passthru cmd */
 	if (cmnd->device->host != NULL)
@@ -144,7 +133,7 @@ bfa_cb_ioim_abort(void *drv, struct bfad_ioim_s *dio)
 	struct scsi_cmnd *cmnd = (struct scsi_cmnd *)dio;
 	struct bfad_s         *bfad = drv;
 
-	cmnd->result = ScsiResult(DID_ERROR, 0);
+	cmnd->result = DID_ERROR << 16;
 
 	/* Unmap DMA, if host is NULL, it means a scsi passthru cmd */
 	if (cmnd->device->host != NULL)
@@ -546,7 +535,8 @@ int
 bfad_im_scsi_host_alloc(struct bfad_s *bfad, struct bfad_im_port_s *im_port,
 			struct device *dev)
 {
-	int error = 1;
+	struct bfad_im_port_pointer *im_portp;
+	int error;
 
 	mutex_lock(&bfad_mutex);
 	error = idr_alloc(&bfad_im_port_index, im_port, 0, 0, GFP_KERNEL);
@@ -564,7 +554,8 @@ bfad_im_scsi_host_alloc(struct bfad_s *bfad, struct bfad_im_port_s *im_port,
 		goto out_free_idr;
 	}
 
-	im_port->shost->hostdata[0] = (unsigned long)im_port;
+	im_portp = shost_priv(im_port->shost);
+	im_portp->p = im_port;
 	im_port->shost->unique_id = im_port->idr_id;
 	im_port->shost->this_id = -1;
 	im_port->shost->max_id = MAX_FCP_TARGET;
@@ -748,7 +739,7 @@ bfad_scsi_host_alloc(struct bfad_im_port_s *im_port, struct bfad_s *bfad)
 
 	sht->sg_tablesize = bfad->cfg_data.io_max_sge;
 
-	return scsi_host_alloc(sht, sizeof(unsigned long));
+	return scsi_host_alloc(sht, sizeof(struct bfad_im_port_pointer));
 }
 
 void
@@ -818,7 +809,6 @@ struct scsi_host_template bfad_im_scsi_host_template = {
 	.this_id = -1,
 	.sg_tablesize = BFAD_IO_MAX_SGE,
 	.cmd_per_lun = 3,
-	.use_clustering = ENABLE_CLUSTERING,
 	.shost_attrs = bfad_im_host_attrs,
 	.max_sectors = BFAD_MAX_SECTORS,
 	.vendor_id = BFA_PCI_VENDOR_ID_BROCADE,
@@ -841,7 +831,6 @@ struct scsi_host_template bfad_im_vport_template = {
 	.this_id = -1,
 	.sg_tablesize = BFAD_IO_MAX_SGE,
 	.cmd_per_lun = 3,
-	.use_clustering = ENABLE_CLUSTERING,
 	.shost_attrs = bfad_im_vport_attrs,
 	.max_sectors = BFAD_MAX_SECTORS,
 };
@@ -1251,14 +1240,14 @@ bfad_im_queuecommand_lck(struct scsi_cmnd *cmnd, void (*done) (struct scsi_cmnd 
 		printk(KERN_WARNING
 			"bfad%d, queuecommand %p %x failed, BFA stopped\n",
 		       bfad->inst_no, cmnd, cmnd->cmnd[0]);
-		cmnd->result = ScsiResult(DID_NO_CONNECT, 0);
+		cmnd->result = DID_NO_CONNECT << 16;
 		goto out_fail_cmd;
 	}
 
 
 	itnim = itnim_data->itnim;
 	if (!itnim) {
-		cmnd->result = ScsiResult(DID_IMM_RETRY, 0);
+		cmnd->result = DID_IMM_RETRY << 16;
 		goto out_fail_cmd;
 	}
 

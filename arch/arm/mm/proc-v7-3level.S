@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * arch/arm/mm/proc-v7-3level.S
  *
@@ -5,19 +6,6 @@
  * Copyright (C) 2011 ARM Ltd.
  * Author: Catalin Marinas <catalin.marinas@arm.com>
  *   based on arch/arm/mm/proc-v7-2level.S
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 #include <asm/assembler.h>
 
@@ -54,11 +42,6 @@
  * Set the translation table base pointer to be pgd_phys (physical address of
  * the new TTB).
  */
-ENTRY(cpu_v7_btbinv_switch_mm)
-#ifdef CONFIG_MMU
-	mov	r2, #0
-	mcr	p15, 0, r2, c7, c5, 6			@ flush BTAC/BTB
-#endif
 ENTRY(cpu_v7_switch_mm)
 #ifdef CONFIG_MMU
 	mmid	r2, r2
@@ -69,7 +52,6 @@ ENTRY(cpu_v7_switch_mm)
 #endif
 	ret	lr
 ENDPROC(cpu_v7_switch_mm)
-ENDPROC(cpu_v7_btbinv_switch_mm)
 
 #ifdef __ARMEB__
 #define rl r3

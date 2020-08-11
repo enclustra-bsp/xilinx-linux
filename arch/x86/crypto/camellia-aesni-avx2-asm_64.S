@@ -1,17 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * x86_64/AVX2/AES-NI assembler implementation of Camellia
  *
  * Copyright © 2013 Jussi Kivilinna <jussi.kivilinna@iki.fi>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
  */
 
 #include <linux/linkage.h>
 #include <asm/frame.h>
+#include <asm/nospec-branch.h>
 
 #define CAMELLIA_TABLE_BYTE_LEN 272
 
@@ -1343,7 +1339,7 @@ camellia_xts_crypt_32way:
 	vpxor 14 * 32(%rax), %ymm15, %ymm14;
 	vpxor 15 * 32(%rax), %ymm15, %ymm15;
 
-	call *%r9;
+	CALL_NOSPEC %r9;
 
 	addq $(16 * 32), %rsp;
 

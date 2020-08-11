@@ -66,6 +66,9 @@
 #define write_sysreg(v, ...)		__write_sysreg(v, __VA_ARGS__)
 
 #define BPIALL				__ACCESS_CP15(c7, 0, c5, 6)
+#define ICIALLU				__ACCESS_CP15(c7, 0, c5, 0)
+
+#define CNTVCT				__ACCESS_CP15_64(1, c14)
 
 extern unsigned long cr_alignment;	/* defined in entry-armv.S */
 

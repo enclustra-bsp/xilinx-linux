@@ -1,6 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0
+
+#ifdef CONFIG_XEN_BALLOON_MEMORY_HOTPLUG
+#include <linux/memblock.h>
+#endif
 #include <linux/cpu.h>
 #include <linux/kexec.h>
+#include <linux/slab.h>
 
+#include <xen/xen.h>
 #include <xen/features.h>
 #include <xen/page.h>
 
@@ -59,6 +66,13 @@ struct shared_info xen_dummy_shared_info;
 
 __read_mostly int xen_have_vector_callback;
 EXPORT_SYMBOL_GPL(xen_have_vector_callback);
+
+/*
+ * NB: needs to live in .data because it's used by xen_prepare_pvh which runs
+ * before clearing the bss.
+ */
+uint32_t xen_start_flags __attribute__((section(".data"))) = 0;
+EXPORT_SYMBOL(xen_start_flags);
 
 /*
  * Point at some empty memory to start with. We map the real shared_info
@@ -255,18 +269,40 @@ void xen_reboot(int reason)
 		BUG();
 }
 
+static int reboot_reason = SHUTDOWN_reboot;
+static bool xen_legacy_crash;
 void xen_emergency_restart(void)
 {
-	xen_reboot(SHUTDOWN_reboot);
+	xen_reboot(reboot_reason);
 }
 
 static int
 xen_panic_event(struct notifier_block *this, unsigned long event, void *ptr)
 {
-	if (!kexec_crash_loaded())
-		xen_reboot(SHUTDOWN_crash);
+	if (!kexec_crash_loaded()) {
+		if (xen_legacy_crash)
+			xen_reboot(SHUTDOWN_crash);
+
+		reboot_reason = SHUTDOWN_crash;
+
+		/*
+		 * If panic_timeout==0 then we are supposed to wait forever.
+		 * However, to preserve original dom0 behavior we have to drop
+		 * into hypervisor. (domU behavior is controlled by its
+		 * config file)
+		 */
+		if (panic_timeout == 0)
+			panic_timeout = -1;
+	}
 	return NOTIFY_DONE;
 }
+
+static int __init parse_xen_legacy_crash(char *arg)
+{
+	xen_legacy_crash = true;
+	return 0;
+}
+early_param("xen_legacy_crash", parse_xen_legacy_crash);
 
 static struct notifier_block xen_panic_block = {
 	.notifier_call = xen_panic_event,

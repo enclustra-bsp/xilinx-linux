@@ -1,18 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *Copyright (C) 2011 LAPIS Semiconductor Co., Ltd.
- *
- *This program is free software; you can redistribute it and/or modify
- *it under the terms of the GNU General Public License as published by
- *the Free Software Foundation; version 2 of the License.
- *
- *This program is distributed in the hope that it will be useful,
- *but WITHOUT ANY WARRANTY; without even the implied warranty of
- *MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *GNU General Public License for more details.
- *
- *You should have received a copy of the GNU General Public License
- *along with this program; if not, write to the Free Software
- *Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307, USA.
  */
 #if defined(CONFIG_SERIAL_PCH_UART_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
 #define SUPPORT_SYSRQ
@@ -203,8 +191,6 @@ enum {
 #define PCH_UART_HAL_OUT		(PCH_UART_MCR_OUT)
 #define PCH_UART_HAL_LOOP		(PCH_UART_MCR_LOOP)
 #define PCH_UART_HAL_AFE		(PCH_UART_MCR_AFE)
-
-#define PCI_VENDOR_ID_ROHM		0x10DB
 
 #define BOTH_EMPTY (UART_LSR_TEMT | UART_LSR_THRE)
 
@@ -945,7 +931,6 @@ static unsigned int dma_handle_tx(struct eg20t_port *priv)
 	struct scatterlist *sg;
 	int nent;
 	int fifo_size;
-	int tx_empty;
 	struct dma_async_tx_descriptor *desc;
 	int num;
 	int i;
@@ -970,11 +955,9 @@ static unsigned int dma_handle_tx(struct eg20t_port *priv)
 	}
 
 	fifo_size = max(priv->fifo_size, 1);
-	tx_empty = 1;
 	if (pop_tx_x(priv, xmit->buf)) {
 		pch_uart_hal_write(priv, xmit->buf, 1);
 		port->icount.tx++;
-		tx_empty = 0;
 		fifo_size--;
 	}
 
@@ -1003,7 +986,7 @@ static unsigned int dma_handle_tx(struct eg20t_port *priv)
 
 	priv->tx_dma_use = 1;
 
-	priv->sg_tx_p = kzalloc(sizeof(struct scatterlist)*num, GFP_ATOMIC);
+	priv->sg_tx_p = kcalloc(num, sizeof(struct scatterlist), GFP_ATOMIC);
 	if (!priv->sg_tx_p) {
 		dev_err(priv->port.dev, "%s:kzalloc Failed\n", __func__);
 		return 0;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-1.0+
 /* generic HDLC line discipline for Linux
  *
  * Written by Paul Fulghum paulkf@microgate.com
@@ -10,8 +11,6 @@
  *	Paul Mackerras <Paul.Mackerras@cs.anu.edu.au>
  *
  * Original release 01/11/99
- *
- * This code is released under the GNU General Public License (GPL)
  *
  * This module implements the tty line discipline N_HDLC for use with
  * tty device drivers that support bit-synchronous HDLC communications.
@@ -181,7 +180,7 @@ static ssize_t n_hdlc_tty_write(struct tty_struct *tty, struct file *file,
 			    const unsigned char *buf, size_t nr);
 static int n_hdlc_tty_ioctl(struct tty_struct *tty, struct file *file,
 			    unsigned int cmd, unsigned long arg);
-static unsigned int n_hdlc_tty_poll(struct tty_struct *tty, struct file *filp,
+static __poll_t n_hdlc_tty_poll(struct tty_struct *tty, struct file *filp,
 				    poll_table *wait);
 static int n_hdlc_tty_open(struct tty_struct *tty);
 static void n_hdlc_tty_close(struct tty_struct *tty);
@@ -574,7 +573,7 @@ static ssize_t n_hdlc_tty_read(struct tty_struct *tty, struct file *file,
 		return -EIO;
 
 	/* verify user access to buffer */
-	if (!access_ok(VERIFY_WRITE, buf, nr)) {
+	if (!access_ok(buf, nr)) {
 		printk(KERN_WARNING "%s(%d) n_hdlc_tty_read() can't verify user "
 		"buffer\n", __FILE__, __LINE__);
 		return -EFAULT;
@@ -598,6 +597,7 @@ static ssize_t n_hdlc_tty_read(struct tty_struct *tty, struct file *file,
 				/* too large for caller's buffer */
 				ret = -EOVERFLOW;
 			} else {
+				__set_current_state(TASK_RUNNING);
 				if (copy_to_user(buf, rbuf->buf, rbuf->count))
 					ret = -EFAULT;
 				else
@@ -613,7 +613,7 @@ static ssize_t n_hdlc_tty_read(struct tty_struct *tty, struct file *file,
 		}
 			
 		/* no data */
-		if (file->f_flags & O_NONBLOCK) {
+		if (tty_io_nonblock(tty, file)) {
 			ret = -EAGAIN;
 			break;
 		}
@@ -680,7 +680,7 @@ static ssize_t n_hdlc_tty_write(struct tty_struct *tty, struct file *file,
 		if (tbuf)
 			break;
 
-		if (file->f_flags & O_NONBLOCK) {
+		if (tty_io_nonblock(tty, file)) {
 			error = -EAGAIN;
 			break;
 		}
@@ -777,7 +777,7 @@ static int n_hdlc_tty_ioctl(struct tty_struct *tty, struct file *file,
 		case TCOFLUSH:
 			flush_tx_queue(tty);
 		}
-		/* fall through to default */
+		/* fall through - to default */
 
 	default:
 		error = n_tty_ioctl_helper(tty, file, cmd, arg);
@@ -797,11 +797,11 @@ static int n_hdlc_tty_ioctl(struct tty_struct *tty, struct file *file,
  * to caller.
  * Returns a bit mask containing info on which ops will not block.
  */
-static unsigned int n_hdlc_tty_poll(struct tty_struct *tty, struct file *filp,
+static __poll_t n_hdlc_tty_poll(struct tty_struct *tty, struct file *filp,
 				    poll_table *wait)
 {
 	struct n_hdlc *n_hdlc = tty2n_hdlc (tty);
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 
 	if (debuglevel >= DEBUG_LEVEL_INFO)	
 		printk("%s(%d)n_hdlc_tty_poll() called\n",__FILE__,__LINE__);
@@ -815,14 +815,14 @@ static unsigned int n_hdlc_tty_poll(struct tty_struct *tty, struct file *filp,
 
 		/* set bits for operations that won't block */
 		if (!list_empty(&n_hdlc->rx_buf_list.list))
-			mask |= POLLIN | POLLRDNORM;	/* readable */
+			mask |= EPOLLIN | EPOLLRDNORM;	/* readable */
 		if (test_bit(TTY_OTHER_CLOSED, &tty->flags))
-			mask |= POLLHUP;
+			mask |= EPOLLHUP;
 		if (tty_hung_up_p(filp))
-			mask |= POLLHUP;
+			mask |= EPOLLHUP;
 		if (!tty_is_writelocked(tty) &&
 				!list_empty(&n_hdlc->tx_free_buf_list.list))
-			mask |= POLLOUT | POLLWRNORM;	/* writable */
+			mask |= EPOLLOUT | EPOLLWRNORM;	/* writable */
 	}
 	return mask;
 }	/* end of n_hdlc_tty_poll() */
@@ -967,6 +967,11 @@ static int __init n_hdlc_init(void)
 	return status;
 	
 }	/* end of init_module() */
+
+#ifdef CONFIG_SPARC
+#undef __exitdata
+#define __exitdata
+#endif
 
 static const char hdlc_unregister_ok[] __exitdata =
 	KERN_INFO "N_HDLC: line discipline unregistered\n";

@@ -1,12 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ALPS touchpad PS/2 mouse driver
  *
  * Copyright (c) 2003 Peter Osterlund <petero2@telia.com>
  * Copyright (c) 2005 Vojtech Pavlik <vojtech@suse.cz>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 #ifndef _ALPS_H
@@ -141,10 +138,12 @@ enum SS4_PACKET_ID {
 #define SS4_TS_Z_V2(_b)		(s8)(_b[4] & 0x7F)
 
 
-#define SS4_MFPACKET_NO_AX	8160	/* X-Coordinate value */
-#define SS4_MFPACKET_NO_AY	4080	/* Y-Coordinate value */
-#define SS4_MFPACKET_NO_AX_BL	8176	/* Buttonless X-Coordinate value */
-#define SS4_MFPACKET_NO_AY_BL	4088	/* Buttonless Y-Coordinate value */
+#define SS4_MFPACKET_NO_AX		8160	/* X-Coordinate value */
+#define SS4_MFPACKET_NO_AY		4080	/* Y-Coordinate value */
+#define SS4_MFPACKET_NO_AX_BL		8176	/* Buttonless X-Coord value */
+#define SS4_MFPACKET_NO_AY_BL		4088	/* Buttonless Y-Coord value */
+#define SS4_PLUS_MFPACKET_NO_AX		4080	/* SS4 PLUS, X */
+#define SS4_PLUS_MFPACKET_NO_AX_BL	4088	/* Buttonless SS4 PLUS, X */
 
 /*
  * enum V7_PACKET_ID - defines the packet type for V7
@@ -324,18 +323,7 @@ struct alps_data {
 
 #define ALPS_QUIRK_TRACKSTICK_BUTTONS	1 /* trakcstick buttons in trackstick packet */
 
-#ifdef CONFIG_MOUSE_PS2_ALPS
 int alps_detect(struct psmouse *psmouse, bool set_properties);
 int alps_init(struct psmouse *psmouse);
-#else
-inline int alps_detect(struct psmouse *psmouse, bool set_properties)
-{
-	return -ENOSYS;
-}
-inline int alps_init(struct psmouse *psmouse)
-{
-	return -ENOSYS;
-}
-#endif /* CONFIG_MOUSE_PS2_ALPS */
 
 #endif

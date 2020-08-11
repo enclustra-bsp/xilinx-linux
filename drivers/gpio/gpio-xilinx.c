@@ -428,6 +428,7 @@ static void xgpio_irqhandler(struct irq_desc *desc)
 }
 
 static struct lock_class_key gpio_lock_class;
+static struct lock_class_key gpio_request_class;
 
 /**
  * xgpio_irq_setup - Allocate irq for gpio and setup appropriate functions
@@ -444,14 +445,14 @@ static int xgpio_irq_setup(struct device_node *np, struct xgpio_instance *chip)
 
 	int ret = of_irq_to_resource(np, 0, &res);
 
-	if (!ret) {
+	if (ret <= 0) {
 		pr_info("GPIO IRQ not connected\n");
 		return 0;
 	}
 
 	chip->mmchip.gc.to_irq = xgpio_to_irq;
 
-	chip->irq_base = irq_alloc_descs(-1, 0, chip->mmchip.gc.ngpio, 0);
+	chip->irq_base = irq_alloc_descs(-1, 1, chip->mmchip.gc.ngpio, 0);
 	if (chip->irq_base < 0) {
 		pr_err("Couldn't allocate IRQ numbers\n");
 		return -1;
@@ -467,7 +468,8 @@ static int xgpio_irq_setup(struct device_node *np, struct xgpio_instance *chip)
 	for (pin_num = 0; pin_num < chip->mmchip.gc.ngpio; pin_num++) {
 		u32 gpio_irq = irq_find_mapping(chip->irq_domain, pin_num);
 
-		irq_set_lockdep_class(gpio_irq, &gpio_lock_class);
+		irq_set_lockdep_class(gpio_irq, &gpio_lock_class,
+				      &gpio_request_class);
 		pr_debug("IRQ Base: %d, Pin %d = IRQ %d\n",
 			chip->irq_base,	pin_num, gpio_irq);
 		irq_set_chip_and_handler(gpio_irq, &xgpio_irqchip,
@@ -648,9 +650,9 @@ static int xgpio_of_probe(struct platform_device *pdev)
 
 	chip->clk = devm_clk_get(&pdev->dev, "s_axi_aclk");
 	if (IS_ERR(chip->clk)) {
-		if ((PTR_ERR(chip->clk) != -ENOENT) ||
-				(PTR_ERR(chip->clk) != -EPROBE_DEFER)) {
-			dev_err(&pdev->dev, "Input clock not found\n");
+		if (PTR_ERR(chip->clk) != -ENOENT) {
+			if (PTR_ERR(chip->clk) != -EPROBE_DEFER)
+				dev_err(&pdev->dev, "Input clock not found\n");
 			return PTR_ERR(chip->clk);
 		}
 
@@ -780,19 +782,7 @@ static struct platform_driver xilinx_gpio_driver = {
 	},
 };
 
-static int __init xgpio_init(void)
-{
-	return platform_driver_register(&xilinx_gpio_driver);
-}
-
-/* Make sure we get initialized before anyone else tries to use us */
-subsys_initcall(xgpio_init);
-
-static void __exit xgpio_exit(void)
-{
-	platform_driver_unregister(&xilinx_gpio_driver);
-}
-module_exit(xgpio_exit);
+module_platform_driver(xilinx_gpio_driver);
 
 MODULE_AUTHOR("Xilinx, Inc.");
 MODULE_DESCRIPTION("Xilinx GPIO driver");

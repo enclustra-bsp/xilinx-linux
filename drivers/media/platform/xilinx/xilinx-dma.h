@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Xilinx Video DMA
  *
@@ -6,10 +7,6 @@
  *
  * Contacts: Hyun Kwon <hyun.kwon@xilinx.com>
  *           Laurent Pinchart <laurent.pinchart@ideasonboard.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __XILINX_VIP_DMA_H__
@@ -21,6 +18,7 @@
 #include <linux/videodev2.h>
 
 #include <media/media-entity.h>
+#include <media/v4l2-ctrls.h>
 #include <media/v4l2-dev.h>
 #include <media/videobuf2-v4l2.h>
 
@@ -59,11 +57,13 @@ static inline struct xvip_pipeline *to_xvip_pipeline(struct media_entity *e)
  * @video: V4L2 video device associated with the DMA channel
  * @pad: media pad for the video device entity
  * @remote_subdev_med_bus: media bus format of sub-device
+ * @ctrl_handler: V4L2 ctrl_handler for inheritance ctrls from subdev
  * @xdev: composite device the DMA channel belongs to
  * @pipe: pipeline belonging to the DMA channel
  * @port: composite device DT node port number for the DMA channel
  * @lock: protects the @format, @fmtinfo and @queue fields
  * @format: active V4L2 pixel format
+ * @r: crop rectangle parameters
  * @fmtinfo: format information corresponding to the active @format
  * @poss_v4l2_fmts: All possible v4l formats supported
  * @poss_v4l2_fmt_cnt: number of supported v4l formats
@@ -76,6 +76,7 @@ static inline struct xvip_pipeline *to_xvip_pipeline(struct media_entity *e)
  * @xt: dma interleaved template for dma configuration
  * @sgl: data chunk structure for dma_interleaved_template
  * @prev_fid: Previous Field ID
+ * @low_latency_cap: Low latency capture mode
  */
 struct xvip_dma {
 	struct list_head list;
@@ -83,12 +84,15 @@ struct xvip_dma {
 	struct media_pad pad;
 	u32 remote_subdev_med_bus;
 
+	struct v4l2_ctrl_handler ctrl_handler;
+
 	struct xvip_composite_device *xdev;
 	struct xvip_pipeline pipe;
 	unsigned int port;
 
 	struct mutex lock;
 	struct v4l2_format format;
+	struct v4l2_rect r;
 	const struct xvip_video_format *fmtinfo;
 	u32 *poss_v4l2_fmts;
 	u32 poss_v4l2_fmt_cnt;
@@ -105,6 +109,7 @@ struct xvip_dma {
 	struct data_chunk sgl[1];
 
 	u32 prev_fid;
+	u32 low_latency_cap;
 };
 
 #define to_xvip_dma(vdev)	container_of(vdev, struct xvip_dma, video)

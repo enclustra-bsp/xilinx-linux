@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * VFIO core
  *
  * Copyright (C) 2012 Red Hat, Inc.  All rights reserved.
  *     Author: Alex Williamson <alex.williamson@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Derived from original vfio:
  * Copyright 2010 Cisco Systems, Inc.  All rights reserved.
@@ -34,6 +31,7 @@
 #include <linux/uaccess.h>
 #include <linux/vfio.h>
 #include <linux/wait.h>
+#include <linux/sched/signal.h>
 
 #define DRIVER_VERSION	"0.3"
 #define DRIVER_AUTHOR	"Alex Williamson <alex.williamson@redhat.com>"
@@ -630,8 +628,6 @@ static const char * const vfio_driver_whitelist[] = { "pci-stub" };
 
 static bool vfio_dev_whitelisted(struct device *dev, struct device_driver *drv)
 {
-	int i;
-
 	if (dev_is_pci(dev)) {
 		struct pci_dev *pdev = to_pci_dev(dev);
 
@@ -639,12 +635,9 @@ static bool vfio_dev_whitelisted(struct device *dev, struct device_driver *drv)
 			return true;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(vfio_driver_whitelist); i++) {
-		if (!strcmp(drv->name, vfio_driver_whitelist[i]))
-			return true;
-	}
-
-	return false;
+	return match_string(vfio_driver_whitelist,
+			    ARRAY_SIZE(vfio_driver_whitelist),
+			    drv->name) >= 0;
 }
 
 /*
@@ -665,7 +658,7 @@ static int vfio_dev_viable(struct device *dev, void *data)
 {
 	struct vfio_group *group = data;
 	struct vfio_device *device;
-	struct device_driver *drv = ACCESS_ONCE(dev->driver);
+	struct device_driver *drv = READ_ONCE(dev->driver);
 	struct vfio_unbound_dev *unbound;
 	int ret = -EINVAL;
 
@@ -709,8 +702,8 @@ static int vfio_group_nb_add_dev(struct vfio_group *group, struct device *dev)
 		return 0;
 
 	/* TODO Prevent device auto probing */
-	WARN(1, "Device %s added to live group %d!\n", dev_name(dev),
-	     iommu_group_id(group->iommu_group));
+	dev_WARN(dev, "Device added to live group %d!\n",
+		 iommu_group_id(group->iommu_group));
 
 	return 0;
 }
@@ -753,25 +746,22 @@ static int vfio_iommu_group_notifier(struct notifier_block *nb,
 		 */
 		break;
 	case IOMMU_GROUP_NOTIFY_BIND_DRIVER:
-		pr_debug("%s: Device %s, group %d binding to driver\n",
-			 __func__, dev_name(dev),
-			 iommu_group_id(group->iommu_group));
+		dev_dbg(dev, "%s: group %d binding to driver\n", __func__,
+			iommu_group_id(group->iommu_group));
 		break;
 	case IOMMU_GROUP_NOTIFY_BOUND_DRIVER:
-		pr_debug("%s: Device %s, group %d bound to driver %s\n",
-			 __func__, dev_name(dev),
-			 iommu_group_id(group->iommu_group), dev->driver->name);
+		dev_dbg(dev, "%s: group %d bound to driver %s\n", __func__,
+			iommu_group_id(group->iommu_group), dev->driver->name);
 		BUG_ON(vfio_group_nb_verify(group, dev));
 		break;
 	case IOMMU_GROUP_NOTIFY_UNBIND_DRIVER:
-		pr_debug("%s: Device %s, group %d unbinding from driver %s\n",
-			 __func__, dev_name(dev),
-			 iommu_group_id(group->iommu_group), dev->driver->name);
+		dev_dbg(dev, "%s: group %d unbinding from driver %s\n",
+			__func__, iommu_group_id(group->iommu_group),
+			dev->driver->name);
 		break;
 	case IOMMU_GROUP_NOTIFY_UNBOUND_DRIVER:
-		pr_debug("%s: Device %s, group %d unbound from driver\n",
-			 __func__, dev_name(dev),
-			 iommu_group_id(group->iommu_group));
+		dev_dbg(dev, "%s: group %d unbound from driver\n", __func__,
+			iommu_group_id(group->iommu_group));
 		/*
 		 * XXX An unbound device in a live group is ok, but we'd
 		 * really like to avoid the above BUG_ON by preventing other
@@ -835,8 +825,8 @@ int vfio_add_group_dev(struct device *dev,
 
 	device = vfio_group_get_device(group, dev);
 	if (device) {
-		WARN(1, "Device %s already exists on group %d\n",
-		     dev_name(dev), iommu_group_id(iommu_group));
+		dev_WARN(dev, "Device already exists on group %d\n",
+			 iommu_group_id(iommu_group));
 		vfio_device_put(device);
 		vfio_group_put(group);
 		return -EBUSY;
@@ -909,30 +899,17 @@ void *vfio_device_data(struct vfio_device *device)
 }
 EXPORT_SYMBOL_GPL(vfio_device_data);
 
-/* Given a referenced group, check if it contains the device */
-static bool vfio_dev_present(struct vfio_group *group, struct device *dev)
-{
-	struct vfio_device *device;
-
-	device = vfio_group_get_device(group, dev);
-	if (!device)
-		return false;
-
-	vfio_device_put(device);
-	return true;
-}
-
 /*
  * Decrement the device reference count and wait for the device to be
  * removed.  Open file descriptors for the device... */
 void *vfio_del_group_dev(struct device *dev)
 {
+	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	struct vfio_device *device = dev_get_drvdata(dev);
 	struct vfio_group *group = device->group;
 	void *device_data = device->device_data;
 	struct vfio_unbound_dev *unbound;
 	unsigned int i = 0;
-	long ret;
 	bool interrupted = false;
 
 	/*
@@ -969,6 +946,8 @@ void *vfio_del_group_dev(struct device *dev)
 	 * interval with counter to allow the driver to take escalating
 	 * measures to release the device if it has the ability to do so.
 	 */
+	add_wait_queue(&vfio.release_q, &wait);
+
 	do {
 		device = vfio_group_get_device(group, dev);
 		if (!device)
@@ -980,12 +959,10 @@ void *vfio_del_group_dev(struct device *dev)
 		vfio_device_put(device);
 
 		if (interrupted) {
-			ret = wait_event_timeout(vfio.release_q,
-					!vfio_dev_present(group, dev), HZ * 10);
+			wait_woken(&wait, TASK_UNINTERRUPTIBLE, HZ * 10);
 		} else {
-			ret = wait_event_interruptible_timeout(vfio.release_q,
-					!vfio_dev_present(group, dev), HZ * 10);
-			if (ret == -ERESTARTSYS) {
+			wait_woken(&wait, TASK_INTERRUPTIBLE, HZ * 10);
+			if (signal_pending(current)) {
 				interrupted = true;
 				dev_warn(dev,
 					 "Device is currently in use, task"
@@ -994,8 +971,10 @@ void *vfio_del_group_dev(struct device *dev)
 					 current->comm, task_pid_nr(current));
 			}
 		}
-	} while (ret <= 0);
 
+	} while (1);
+
+	remove_wait_queue(&vfio.release_q, &wait);
 	/*
 	 * In order to support multiple devices per group, devices can be
 	 * plucked from the group while other devices in the group are still
@@ -1857,62 +1836,18 @@ void vfio_info_cap_shift(struct vfio_info_cap *caps, size_t offset)
 }
 EXPORT_SYMBOL(vfio_info_cap_shift);
 
-static int sparse_mmap_cap(struct vfio_info_cap *caps, void *cap_type)
+int vfio_info_add_capability(struct vfio_info_cap *caps,
+			     struct vfio_info_cap_header *cap, size_t size)
 {
 	struct vfio_info_cap_header *header;
-	struct vfio_region_info_cap_sparse_mmap *sparse_cap, *sparse = cap_type;
-	size_t size;
 
-	size = sizeof(*sparse) + sparse->nr_areas *  sizeof(*sparse->areas);
-	header = vfio_info_cap_add(caps, size,
-				   VFIO_REGION_INFO_CAP_SPARSE_MMAP, 1);
+	header = vfio_info_cap_add(caps, size, cap->id, cap->version);
 	if (IS_ERR(header))
 		return PTR_ERR(header);
 
-	sparse_cap = container_of(header,
-			struct vfio_region_info_cap_sparse_mmap, header);
-	sparse_cap->nr_areas = sparse->nr_areas;
-	memcpy(sparse_cap->areas, sparse->areas,
-	       sparse->nr_areas * sizeof(*sparse->areas));
+	memcpy(header + 1, cap + 1, size - sizeof(*header));
+
 	return 0;
-}
-
-static int region_type_cap(struct vfio_info_cap *caps, void *cap_type)
-{
-	struct vfio_info_cap_header *header;
-	struct vfio_region_info_cap_type *type_cap, *cap = cap_type;
-
-	header = vfio_info_cap_add(caps, sizeof(*cap),
-				   VFIO_REGION_INFO_CAP_TYPE, 1);
-	if (IS_ERR(header))
-		return PTR_ERR(header);
-
-	type_cap = container_of(header, struct vfio_region_info_cap_type,
-				header);
-	type_cap->type = cap->type;
-	type_cap->subtype = cap->subtype;
-	return 0;
-}
-
-int vfio_info_add_capability(struct vfio_info_cap *caps, int cap_type_id,
-			     void *cap_type)
-{
-	int ret = -EINVAL;
-
-	if (!cap_type)
-		return 0;
-
-	switch (cap_type_id) {
-	case VFIO_REGION_INFO_CAP_SPARSE_MMAP:
-		ret = sparse_mmap_cap(caps, cap_type);
-		break;
-
-	case VFIO_REGION_INFO_CAP_TYPE:
-		ret = region_type_cap(caps, cap_type);
-		break;
-	}
-
-	return ret;
 }
 EXPORT_SYMBOL(vfio_info_add_capability);
 
@@ -2268,12 +2203,12 @@ static int __init vfio_init(void)
 
 	vfio.class->devnode = vfio_devnode;
 
-	ret = alloc_chrdev_region(&vfio.group_devt, 0, MINORMASK, "vfio");
+	ret = alloc_chrdev_region(&vfio.group_devt, 0, MINORMASK + 1, "vfio");
 	if (ret)
 		goto err_alloc_chrdev;
 
 	cdev_init(&vfio.group_cdev, &vfio_group_fops);
-	ret = cdev_add(&vfio.group_cdev, vfio.group_devt, MINORMASK);
+	ret = cdev_add(&vfio.group_cdev, vfio.group_devt, MINORMASK + 1);
 	if (ret)
 		goto err_cdev_add;
 
@@ -2285,7 +2220,7 @@ static int __init vfio_init(void)
 	return 0;
 
 err_cdev_add:
-	unregister_chrdev_region(vfio.group_devt, MINORMASK);
+	unregister_chrdev_region(vfio.group_devt, MINORMASK + 1);
 err_alloc_chrdev:
 	class_destroy(vfio.class);
 	vfio.class = NULL;
@@ -2303,7 +2238,7 @@ static void __exit vfio_cleanup(void)
 #endif
 	idr_destroy(&vfio.group_idr);
 	cdev_del(&vfio.group_cdev);
-	unregister_chrdev_region(vfio.group_devt, MINORMASK);
+	unregister_chrdev_region(vfio.group_devt, MINORMASK + 1);
 	class_destroy(vfio.class);
 	vfio.class = NULL;
 	misc_deregister(&vfio_dev);

@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  PS3 platform setup routines.
  *
  *  Copyright (C) 2006 Sony Computer Entertainment Inc.
  *  Copyright 2006 Sony Corp.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/kernel.h>
@@ -24,7 +12,7 @@
 #include <linux/root_dev.h>
 #include <linux/console.h>
 #include <linux/export.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 
 #include <asm/machdep.h>
 #include <asm/firmware.h>
@@ -104,6 +92,21 @@ static void __noreturn ps3_halt(void)
 	ps3_sys_manager_halt(); /* never returns */
 }
 
+static void ps3_panic(char *str)
+{
+	DBG("%s:%d %s\n", __func__, __LINE__, str);
+
+	smp_send_stop();
+	printk("\n");
+	printk("   System does not reboot automatically.\n");
+	printk("   Please press POWER button.\n");
+	printk("\n");
+	panic_flush_kmsg_end();
+
+	while(1)
+		lv1_pause(1);
+}
+
 #if defined(CONFIG_FB_PS3) || defined(CONFIG_FB_PS3_MODULE) || \
     defined(CONFIG_PS3_FLASH) || defined(CONFIG_PS3_FLASH_MODULE)
 static void __init prealloc(struct ps3_prealloc *p)
@@ -111,7 +114,10 @@ static void __init prealloc(struct ps3_prealloc *p)
 	if (!p->size)
 		return;
 
-	p->address = memblock_virt_alloc(p->size, p->align);
+	p->address = memblock_alloc(p->size, p->align);
+	if (!p->address)
+		panic("%s: Failed to allocate %lu bytes align=0x%lx\n",
+		      __func__, p->size, p->align);
 
 	printk(KERN_INFO "%s: %lu bytes at %p\n", p->name, p->size,
 	       p->address);
@@ -255,6 +261,7 @@ define_machine(ps3) {
 	.probe				= ps3_probe,
 	.setup_arch			= ps3_setup_arch,
 	.init_IRQ			= ps3_init_IRQ,
+	.panic				= ps3_panic,
 	.get_boot_time			= ps3_get_boot_time,
 	.set_dabr			= ps3_set_dabr,
 	.calibrate_decr			= ps3_calibrate_decr,

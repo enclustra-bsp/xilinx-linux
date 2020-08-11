@@ -1,11 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (c) 2013 Linaro Ltd.
  * Copyright (c) 2013 Hisilicon Limited.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/bitops.h>
@@ -75,7 +71,7 @@ struct hs_timing {
 	u32 smpl_phase_min;
 };
 
-struct hs_timing hs_timing_cfg[TIMING_MODE][TIMING_CFG_NUM] = {
+static struct hs_timing hs_timing_cfg[TIMING_MODE][TIMING_CFG_NUM] = {
 	{ /* reserved */ },
 	{ /* SD */
 		{7, 0, 15, 15,},  /* 0: LEGACY 400k */
@@ -134,6 +130,9 @@ static int dw_mci_hi6220_parse_dt(struct dw_mci *host)
 	priv->ctrl_id = of_alias_get_id(host->dev->of_node, "mshc");
 	if (priv->ctrl_id < 0)
 		priv->ctrl_id = 0;
+
+	if (priv->ctrl_id >= TIMING_MODE)
+		return -EINVAL;
 
 	host->priv = priv;
 	return 0;
@@ -207,6 +206,7 @@ static int dw_mci_hi6220_execute_tuning(struct dw_mci_slot *slot, u32 opcode)
 
 static const struct dw_mci_drv_data hi6220_data = {
 	.caps			= dw_mci_hi6220_caps,
+	.num_caps		= ARRAY_SIZE(dw_mci_hi6220_caps),
 	.switch_voltage		= dw_mci_hi6220_switch_voltage,
 	.set_ios		= dw_mci_hi6220_set_ios,
 	.parse_dt		= dw_mci_hi6220_parse_dt,

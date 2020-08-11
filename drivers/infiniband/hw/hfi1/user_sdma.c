@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015 - 2017 Intel Corporation.
+ * Copyright(c) 2015 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -76,8 +76,7 @@ MODULE_PARM_DESC(sdma_comp_size, "Size of User SDMA completion ring. Default: 12
 
 static unsigned initial_pkt_count = 8;
 
-static int user_sdma_send_pkts(struct user_sdma_request *req,
-			       unsigned maxpkts);
+static int user_sdma_send_pkts(struct user_sdma_request *req, u16 maxpkts);
 static void user_sdma_txreq_cb(struct sdma_txreq *txreq, int status);
 static inline void pq_update(struct hfi1_user_sdma_pkt_q *pq);
 static void user_sdma_free_request(struct user_sdma_request *req, bool unpin);
@@ -101,7 +100,7 @@ static inline u32 get_lrh_len(struct hfi1_pkt_header, u32 len);
 
 static int defer_packet_queue(
 	struct sdma_engine *sde,
-	struct iowait *wait,
+	struct iowait_work *wait,
 	struct sdma_txreq *txreq,
 	uint seq,
 	bool pkts_sent);
@@ -124,33 +123,31 @@ static struct mmu_rb_ops sdma_rb_ops = {
 
 static int defer_packet_queue(
 	struct sdma_engine *sde,
-	struct iowait *wait,
+	struct iowait_work *wait,
 	struct sdma_txreq *txreq,
 	uint seq,
 	bool pkts_sent)
 {
 	struct hfi1_user_sdma_pkt_q *pq =
-		container_of(wait, struct hfi1_user_sdma_pkt_q, busy);
-	struct hfi1_ibdev *dev = &pq->dd->verbs_dev;
-	struct user_sdma_txreq *tx =
-		container_of(txreq, struct user_sdma_txreq, txreq);
+		container_of(wait->iow, struct hfi1_user_sdma_pkt_q, busy);
 
-	if (sdma_progress(sde, seq, txreq)) {
-		if (tx->busycount++ < MAX_DEFER_RETRY_COUNT)
-			goto eagain;
-	}
+	write_seqlock(&sde->waitlock);
+	if (sdma_progress(sde, seq, txreq))
+		goto eagain;
 	/*
 	 * We are assuming that if the list is enqueued somewhere, it
 	 * is to the dmawait list since that is the only place where
 	 * it is supposed to be enqueued.
 	 */
 	xchg(&pq->state, SDMA_PKT_Q_DEFERRED);
-	write_seqlock(&dev->iowait_lock);
-	if (list_empty(&pq->busy.list))
+	if (list_empty(&pq->busy.list)) {
+		iowait_get_priority(&pq->busy);
 		iowait_queue(pkts_sent, &pq->busy, &sde->dmawait);
-	write_sequnlock(&dev->iowait_lock);
+	}
+	write_sequnlock(&sde->waitlock);
 	return -EBUSY;
 eagain:
+	write_sequnlock(&sde->waitlock);
 	return -EAGAIN;
 }
 
@@ -187,14 +184,13 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 	pq->ctxt = uctxt->ctxt;
 	pq->subctxt = fd->subctxt;
 	pq->n_max_reqs = hfi1_sdma_comp_ring_size;
-	pq->state = SDMA_PKT_Q_INACTIVE;
 	atomic_set(&pq->n_reqs, 0);
 	init_waitqueue_head(&pq->wait);
 	atomic_set(&pq->n_locked, 0);
 	pq->mm = fd->mm;
 
-	iowait_init(&pq->busy, 0, NULL, defer_packet_queue,
-		    activate_packet_queue, NULL);
+	iowait_init(&pq->busy, 0, NULL, NULL, defer_packet_queue,
+		    activate_packet_queue, NULL, NULL);
 	pq->reqidx = 0;
 
 	pq->reqs = kcalloc(hfi1_sdma_comp_ring_size,
@@ -276,7 +272,7 @@ int hfi1_user_sdma_free_queues(struct hfi1_filedata *fd,
 		/* Wait until all requests have been freed. */
 		wait_event_interruptible(
 			pq->wait,
-			(ACCESS_ONCE(pq->state) == SDMA_PKT_Q_INACTIVE));
+			!atomic_read(&pq->n_reqs));
 		kfree(pq->reqs);
 		kfree(pq->req_in_use);
 		kmem_cache_destroy(pq->txreq_cache);
@@ -312,6 +308,13 @@ static u8 dlid_to_selector(u16 dlid)
 	return mapping[hash];
 }
 
+/**
+ * hfi1_user_sdma_process_request() - Process and start a user sdma request
+ * @fd: valid file descriptor
+ * @iovec: array of io vectors to process
+ * @dim: overall iovec array size
+ * @count: number of io vector array entries processed
+ */
 int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 				   struct iovec *iovec, unsigned long dim,
 				   unsigned long *count)
@@ -328,7 +331,6 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	u8 opcode, sc, vl;
 	u16 pkey;
 	u32 slid;
-	int req_queued = 0;
 	u16 dlid;
 	u32 selector;
 
@@ -392,7 +394,6 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	req->data_len  = 0;
 	req->pq = pq;
 	req->cq = cq;
-	req->status = -1;
 	req->ahg_idx = -1;
 	req->iov_idx = 0;
 	req->sent = 0;
@@ -400,11 +401,13 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	req->seqcomp = 0;
 	req->seqsubmitted = 0;
 	req->tids = NULL;
-	req->done = 0;
 	req->has_error = 0;
 	INIT_LIST_HEAD(&req->txps);
 
 	memcpy(&req->info, &info, sizeof(info));
+
+	/* The request is initialized, count it */
+	atomic_inc(&pq->n_reqs);
 
 	if (req_opcode(info.ctrl) == EXPECTED) {
 		/* expected must have a TID info and at least one data vector */
@@ -500,7 +503,6 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 		ret = pin_vector_pages(req, &req->iovs[i]);
 		if (ret) {
 			req->data_iovs = i;
-			req->status = ret;
 			goto free_req;
 		}
 		req->data_len += req->iovs[i].iov.iov_len;
@@ -561,23 +563,11 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 		req->ahg_idx = sdma_ahg_alloc(req->sde);
 
 	set_comp_state(pq, cq, info.comp_idx, QUEUED, 0);
-	atomic_inc(&pq->n_reqs);
-	req_queued = 1;
+	pq->state = SDMA_PKT_Q_ACTIVE;
 	/* Send the first N packets in the request to buy us some time */
 	ret = user_sdma_send_pkts(req, pcount);
-	if (unlikely(ret < 0 && ret != -EBUSY)) {
-		req->status = ret;
+	if (unlikely(ret < 0 && ret != -EBUSY))
 		goto free_req;
-	}
-
-	/*
-	 * It is possible that the SDMA engine would have processed all the
-	 * submitted packets by the time we get here. Therefore, only set
-	 * packet queue state to ACTIVE if there are still uncompleted
-	 * requests.
-	 */
-	if (atomic_read(&pq->n_reqs))
-		xchg(&pq->state, SDMA_PKT_Q_ACTIVE);
 
 	/*
 	 * This is a somewhat blocking send implementation.
@@ -588,14 +578,8 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	while (req->seqsubmitted != req->info.npkts) {
 		ret = user_sdma_send_pkts(req, pcount);
 		if (ret < 0) {
-			if (ret != -EBUSY) {
-				req->status = ret;
-				WRITE_ONCE(req->has_error, 1);
-				if (ACCESS_ONCE(req->seqcomp) ==
-				    req->seqsubmitted - 1)
-					goto free_req;
-				return ret;
-			}
+			if (ret != -EBUSY)
+				goto free_req;
 			wait_event_interruptible_timeout(
 				pq->busy.wait_dma,
 				(pq->state == SDMA_PKT_Q_ACTIVE),
@@ -606,10 +590,19 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	*count += idx;
 	return 0;
 free_req:
-	user_sdma_free_request(req, true);
-	if (req_queued)
+	/*
+	 * If the submitted seqsubmitted == npkts, the completion routine
+	 * controls the final state.  If sequbmitted < npkts, wait for any
+	 * outstanding packets to finish before cleaning up.
+	 */
+	if (req->seqsubmitted < req->info.npkts) {
+		if (req->seqsubmitted)
+			wait_event(pq->busy.wait_dma,
+				   (req->seqcomp == req->seqsubmitted - 1));
+		user_sdma_free_request(req, true);
 		pq_update(pq);
-	set_comp_state(pq, cq, info.comp_idx, ERROR, req->status);
+		set_comp_state(pq, cq, info.comp_idx, ERROR, ret);
+	}
 	return ret;
 }
 
@@ -760,9 +753,10 @@ static int user_sdma_txadd(struct user_sdma_request *req,
 	return ret;
 }
 
-static int user_sdma_send_pkts(struct user_sdma_request *req, unsigned maxpkts)
+static int user_sdma_send_pkts(struct user_sdma_request *req, u16 maxpkts)
 {
-	int ret = 0, count;
+	int ret = 0;
+	u16 count;
 	unsigned npkts = 0;
 	struct user_sdma_txreq *tx = NULL;
 	struct hfi1_user_sdma_pkt_q *pq = NULL;
@@ -807,7 +801,6 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, unsigned maxpkts)
 
 		tx->flags = 0;
 		tx->req = req;
-		tx->busycount = 0;
 		INIT_LIST_HEAD(&tx->list);
 
 		/*
@@ -825,10 +818,10 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, unsigned maxpkts)
 		 */
 		if (req->data_len) {
 			iovec = &req->iovs[req->iov_idx];
-			if (ACCESS_ONCE(iovec->offset) == iovec->iov.iov_len) {
+			if (READ_ONCE(iovec->offset) == iovec->iov.iov_len) {
 				if (++req->iov_idx == req->data_iovs) {
 					ret = -EFAULT;
-					goto free_txreq;
+					goto free_tx;
 				}
 				iovec = &req->iovs[req->iov_idx];
 				WARN_ON(iovec->offset);
@@ -864,8 +857,10 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, unsigned maxpkts)
 
 				changes = set_txreq_header_ahg(req, tx,
 							       datalen);
-				if (changes < 0)
+				if (changes < 0) {
+					ret = changes;
 					goto free_tx;
+				}
 			}
 		} else {
 			ret = sdma_txinit(&tx->txreq, 0, sizeof(req->hdr) +
@@ -914,10 +909,11 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, unsigned maxpkts)
 		npkts++;
 	}
 dosend:
-	ret = sdma_send_txlist(req->sde, &pq->busy, &req->txps, &count);
+	ret = sdma_send_txlist(req->sde,
+			       iowait_get_ib_work(&pq->busy),
+			       &req->txps, &count);
 	req->seqsubmitted += count;
 	if (req->seqsubmitted == req->info.npkts) {
-		WRITE_ONCE(req->done, 1);
 		/*
 		 * The txreq has already been submitted to the HW queue
 		 * so we can free the AHG entry now. Corruption will not
@@ -956,10 +952,8 @@ static int pin_sdma_pages(struct user_sdma_request *req,
 	struct hfi1_user_sdma_pkt_q *pq = req->pq;
 
 	pages = kcalloc(npages, sizeof(*pages), GFP_KERNEL);
-	if (!pages) {
-		SDMA_DBG(req, "Failed page array alloc");
+	if (!pages)
 		return -ENOMEM;
-	}
 	memcpy(pages, node->pages, node->npages * sizeof(*pages));
 
 	npages -= node->npages;
@@ -1130,7 +1124,8 @@ static inline u32 set_pkt_bth_psn(__be32 bthpsn, u8 expct, u32 frags)
 			0xffffffull),
 		psn = val & mask;
 	if (expct)
-		psn = (psn & ~BTH_SEQ_MASK) | ((psn + frags) & BTH_SEQ_MASK);
+		psn = (psn & ~HFI1_KDETH_BTH_SEQ_MASK) |
+			((psn + frags) & HFI1_KDETH_BTH_SEQ_MASK);
 	else
 		psn = psn + frags;
 	return psn & mask;
@@ -1254,20 +1249,25 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 				struct user_sdma_txreq *tx, u32 datalen)
 {
 	u32 ahg[AHG_KDETH_ARRAY_SIZE];
-	int diff = 0;
+	int idx = 0;
 	u8 omfactor; /* KDETH.OM */
 	struct hfi1_user_sdma_pkt_q *pq = req->pq;
 	struct hfi1_pkt_header *hdr = &req->hdr;
 	u16 pbclen = le16_to_cpu(hdr->pbc[0]);
 	u32 val32, tidval = 0, lrhlen = get_lrh_len(*hdr, pad_len(datalen));
+	size_t array_size = ARRAY_SIZE(ahg);
 
 	if (PBC2LRH(pbclen) != lrhlen) {
 		/* PBC.PbcLengthDWs */
-		AHG_HEADER_SET(ahg, diff, 0, 0, 12,
-			       cpu_to_le16(LRH2PBC(lrhlen)));
+		idx = ahg_header_set(ahg, idx, array_size, 0, 0, 12,
+				     (__force u16)cpu_to_le16(LRH2PBC(lrhlen)));
+		if (idx < 0)
+			return idx;
 		/* LRH.PktLen (we need the full 16 bits due to byte swap) */
-		AHG_HEADER_SET(ahg, diff, 3, 0, 16,
-			       cpu_to_be16(lrhlen >> 2));
+		idx = ahg_header_set(ahg, idx, array_size, 3, 0, 16,
+				     (__force u16)cpu_to_be16(lrhlen >> 2));
+		if (idx < 0)
+			return idx;
 	}
 
 	/*
@@ -1278,12 +1278,23 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 		(HFI1_CAP_IS_KSET(EXTENDED_PSN) ? 0x7fffffff : 0xffffff);
 	if (unlikely(tx->flags & TXREQ_FLAGS_REQ_ACK))
 		val32 |= 1UL << 31;
-	AHG_HEADER_SET(ahg, diff, 6, 0, 16, cpu_to_be16(val32 >> 16));
-	AHG_HEADER_SET(ahg, diff, 6, 16, 16, cpu_to_be16(val32 & 0xffff));
+	idx = ahg_header_set(ahg, idx, array_size, 6, 0, 16,
+			     (__force u16)cpu_to_be16(val32 >> 16));
+	if (idx < 0)
+		return idx;
+	idx = ahg_header_set(ahg, idx, array_size, 6, 16, 16,
+			     (__force u16)cpu_to_be16(val32 & 0xffff));
+	if (idx < 0)
+		return idx;
 	/* KDETH.Offset */
-	AHG_HEADER_SET(ahg, diff, 15, 0, 16,
-		       cpu_to_le16(req->koffset & 0xffff));
-	AHG_HEADER_SET(ahg, diff, 15, 16, 16, cpu_to_le16(req->koffset >> 16));
+	idx = ahg_header_set(ahg, idx, array_size, 15, 0, 16,
+			     (__force u16)cpu_to_le16(req->koffset & 0xffff));
+	if (idx < 0)
+		return idx;
+	idx = ahg_header_set(ahg, idx, array_size, 15, 16, 16,
+			     (__force u16)cpu_to_le16(req->koffset >> 16));
+	if (idx < 0)
+		return idx;
 	if (req_opcode(req->info.ctrl) == EXPECTED) {
 		__le16 val;
 
@@ -1310,10 +1321,13 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 				 KDETH_OM_MAX_SIZE) ? KDETH_OM_LARGE_SHIFT :
 				 KDETH_OM_SMALL_SHIFT;
 		/* KDETH.OM and KDETH.OFFSET (TID) */
-		AHG_HEADER_SET(ahg, diff, 7, 0, 16,
-			       ((!!(omfactor - KDETH_OM_SMALL_SHIFT)) << 15 |
+		idx = ahg_header_set(
+				ahg, idx, array_size, 7, 0, 16,
+				((!!(omfactor - KDETH_OM_SMALL_SHIFT)) << 15 |
 				((req->tidoffset >> omfactor)
-				 & 0x7fff)));
+				& 0x7fff)));
+		if (idx < 0)
+			return idx;
 		/* KDETH.TIDCtrl, KDETH.TID, KDETH.Intr, KDETH.SH */
 		val = cpu_to_le16(((EXP_TID_GET(tidval, CTRL) & 0x3) << 10) |
 				   (EXP_TID_GET(tidval, IDX) & 0x3ff));
@@ -1330,28 +1344,33 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 					     AHG_KDETH_INTR_SHIFT));
 		}
 
-		AHG_HEADER_SET(ahg, diff, 7, 16, 14, val);
+		idx = ahg_header_set(ahg, idx, array_size,
+				     7, 16, 14, (__force u16)val);
+		if (idx < 0)
+			return idx;
 	}
-	if (diff < 0)
-		return diff;
 
 	trace_hfi1_sdma_user_header_ahg(pq->dd, pq->ctxt, pq->subctxt,
 					req->info.comp_idx, req->sde->this_idx,
-					req->ahg_idx, ahg, diff, tidval);
+					req->ahg_idx, ahg, idx, tidval);
 	sdma_txinit_ahg(&tx->txreq,
 			SDMA_TXREQ_F_USE_AHG,
-			datalen, req->ahg_idx, diff,
+			datalen, req->ahg_idx, idx,
 			ahg, sizeof(req->hdr),
 			user_sdma_txreq_cb);
 
-	return diff;
+	return idx;
 }
 
-/*
- * SDMA tx request completion callback. Called when the SDMA progress
- * state machine gets notification that the SDMA descriptors for this
- * tx request have been processed by the DMA engine. Called in
- * interrupt context.
+/**
+ * user_sdma_txreq_cb() - SDMA tx request completion callback.
+ * @txreq: valid sdma tx request
+ * @status: success/failure of request
+ *
+ * Called when the SDMA progress state machine gets notification that
+ * the SDMA descriptors for this tx request have been processed by the
+ * DMA engine. Called in interrupt context.
+ * Only do work on completed sequences.
  */
 static void user_sdma_txreq_cb(struct sdma_txreq *txreq, int status)
 {
@@ -1360,7 +1379,7 @@ static void user_sdma_txreq_cb(struct sdma_txreq *txreq, int status)
 	struct user_sdma_request *req;
 	struct hfi1_user_sdma_pkt_q *pq;
 	struct hfi1_user_sdma_comp_q *cq;
-	u16 idx;
+	enum hfi1_sdma_comp_state state = COMPLETE;
 
 	if (!tx->req)
 		return;
@@ -1373,43 +1392,31 @@ static void user_sdma_txreq_cb(struct sdma_txreq *txreq, int status)
 		SDMA_DBG(req, "SDMA completion with error %d",
 			 status);
 		WRITE_ONCE(req->has_error, 1);
+		state = ERROR;
 	}
 
 	req->seqcomp = tx->seqnum;
 	kmem_cache_free(pq->txreq_cache, tx);
-	tx = NULL;
 
-	idx = req->info.comp_idx;
-	if (req->status == -1 && status == SDMA_TXREQ_S_OK) {
-		if (req->seqcomp == req->info.npkts - 1) {
-			req->status = 0;
-			user_sdma_free_request(req, false);
-			pq_update(pq);
-			set_comp_state(pq, cq, idx, COMPLETE, 0);
-		}
-	} else {
-		if (status != SDMA_TXREQ_S_OK)
-			req->status = status;
-		if (req->seqcomp == (ACCESS_ONCE(req->seqsubmitted) - 1) &&
-		    (READ_ONCE(req->done) ||
-		     READ_ONCE(req->has_error))) {
-			user_sdma_free_request(req, false);
-			pq_update(pq);
-			set_comp_state(pq, cq, idx, ERROR, req->status);
-		}
-	}
+	/* sequence isn't complete?  We are done */
+	if (req->seqcomp != req->info.npkts - 1)
+		return;
+
+	user_sdma_free_request(req, false);
+	set_comp_state(pq, cq, req->info.comp_idx, state, status);
+	pq_update(pq);
 }
 
 static inline void pq_update(struct hfi1_user_sdma_pkt_q *pq)
 {
-	if (atomic_dec_and_test(&pq->n_reqs)) {
-		xchg(&pq->state, SDMA_PKT_Q_INACTIVE);
+	if (atomic_dec_and_test(&pq->n_reqs))
 		wake_up(&pq->wait);
-	}
 }
 
 static void user_sdma_free_request(struct user_sdma_request *req, bool unpin)
 {
+	int i;
+
 	if (!list_empty(&req->txps)) {
 		struct sdma_txreq *t, *p;
 
@@ -1421,22 +1428,22 @@ static void user_sdma_free_request(struct user_sdma_request *req, bool unpin)
 			kmem_cache_free(req->pq->txreq_cache, tx);
 		}
 	}
-	if (req->data_iovs) {
-		struct sdma_mmu_node *node;
-		int i;
 
-		for (i = 0; i < req->data_iovs; i++) {
-			node = req->iovs[i].node;
-			if (!node)
-				continue;
+	for (i = 0; i < req->data_iovs; i++) {
+		struct sdma_mmu_node *node = req->iovs[i].node;
 
-			if (unpin)
-				hfi1_mmu_rb_remove(req->pq->handler,
-						   &node->rb);
-			else
-				atomic_dec(&node->refcount);
-		}
+		if (!node)
+			continue;
+
+		req->iovs[i].node = NULL;
+
+		if (unpin)
+			hfi1_mmu_rb_remove(req->pq->handler,
+					   &node->rb);
+		else
+			atomic_dec(&node->refcount);
 	}
+
 	kfree(req->tids);
 	clear_bit(req->info.comp_idx, req->pq->req_in_use);
 }

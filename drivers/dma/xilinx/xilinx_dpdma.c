@@ -797,7 +797,7 @@ xilinx_dpdma_chan_alloc_tx_desc(struct xilinx_dpdma_chan *chan)
 {
 	struct xilinx_dpdma_tx_desc *tx_desc;
 
-	tx_desc = kzalloc(sizeof(*tx_desc), GFP_KERNEL);
+	tx_desc = kzalloc(sizeof(*tx_desc), GFP_ATOMIC);
 	if (!tx_desc)
 		return NULL;
 
@@ -1744,7 +1744,9 @@ static void xilinx_dpdma_chan_handle_err(struct xilinx_dpdma_chan *chan)
 	switch (chan->active_desc->status) {
 	case ERRORED:
 		dev_dbg(dev, "repeated error on desc\n");
+		/* fall-through */
 	case ACTIVE:
+		/* fall-through */
 	case PREPARED:
 		/* Reschedule if there's no new descriptor */
 		if (!chan->pending_desc && !chan->submitted_desc) {

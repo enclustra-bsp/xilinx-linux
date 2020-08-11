@@ -6,7 +6,7 @@ resolution values between 0 to 4096.
 
 Required properties:
 
-- compatible: Must be "xlnx,vpss-scaler".
+- compatible: Must be "xlnx,vpss-scaler-2.2" or "xlnx,vpss-scaler".
 
 - reg: Physical base address and length of registers set for the device.
 
@@ -24,6 +24,17 @@ Required properties:
 
 - reset-gpios: GPIO specifier to assert/de-assert the reset line.
 
+- clocks: List of phandles to AXI Lite and Video clock
+
+- clock-names: Must contain "aclk_ctrl" and "aclk_axis" in same order as clocks
+  listed in clocks property.
+
+- xlnx,max-width: Maximum number of pixels in a line.
+  Valid range from 64 to 8192.
+
+- xlnx,max-height: Maximum number of lines in a frame.
+  Valid range from 64 to 4320.
+
 Example:
 	scaler@a0040000 {
 		compatible = "xlnx,vpss-scaler";
@@ -32,5 +43,8 @@ Example:
 		xlnx,num-hori-taps = <8>;
 		xlnx,num-vert-taps = <8>;
 		xlnx,pix-per-clk = <2>;
+		clock-names = "aclk_ctrl", "aclk_axis";
+		clocks = <&misc_clk_0>, <&misc_clk_1>;
+		xlnx,max-width = <3840>;
+		xlnx,max-height = <2160>;
 	}
-

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /**
  * opt3001.c - Texas Instruments OPT3001 Light Sensor
  *
@@ -5,15 +6,6 @@
  *
  * Author: Andreas Dannenberg <dannenberg@ti.com>
  * Based on previous work from: Felipe Balbi <balbi@ti.com>
- *
- * This program is free software: you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 of the License
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include <linux/bitops.h>
@@ -585,7 +577,6 @@ err:
 }
 
 static const struct iio_info opt3001_info = {
-	.driver_module = THIS_MODULE,
 	.attrs = &opt3001_attribute_group,
 	.read_raw = opt3001_read_raw,
 	.write_raw = opt3001_write_raw,
@@ -695,6 +686,7 @@ static irqreturn_t opt3001_irq(int irq, void *_iio)
 	struct iio_dev *iio = _iio;
 	struct opt3001 *opt = iio_priv(iio);
 	int ret;
+	bool wake_result_ready_queue = false;
 
 	if (!opt->ok_to_ignore_lock)
 		mutex_lock(&opt->lock);
@@ -729,12 +721,15 @@ static irqreturn_t opt3001_irq(int irq, void *_iio)
 		}
 		opt->result = ret;
 		opt->result_ready = true;
-		wake_up(&opt->result_ready_queue);
+		wake_result_ready_queue = true;
 	}
 
 out:
 	if (!opt->ok_to_ignore_lock)
 		mutex_unlock(&opt->lock);
+
+	if (wake_result_ready_queue)
+		wake_up(&opt->result_ready_queue);
 
 	return IRQ_HANDLED;
 }

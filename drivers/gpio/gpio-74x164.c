@@ -1,28 +1,25 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  74Hx164 - Generic serial-in/parallel-out 8-bits shift register GPIO driver
  *
  *  Copyright (C) 2010 Gabor Juhos <juhosg@openwrt.org>
  *  Copyright (C) 2010 Miguel Gaio <miguel.gaio@efixo.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation.
  */
 
 #include <linux/gpio/consumer.h>
-#include <linux/init.h>
-#include <linux/mutex.h>
-#include <linux/spi/spi.h>
-#include <linux/gpio.h>
-#include <linux/of_gpio.h>
-#include <linux/slab.h>
+#include <linux/gpio/driver.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/property.h>
+#include <linux/slab.h>
+#include <linux/spi/spi.h>
 
 #define GEN_74X164_NUMBER_GPIOS	8
 
 struct gen_74x164_chip {
 	struct gpio_chip	gpio_chip;
 	struct mutex		lock;
+	struct gpio_desc	*gpiod_oe;
 	u32			registers;
 	/*
 	 * Since the registers are chained, every byte sent will make
@@ -31,8 +28,7 @@ struct gen_74x164_chip {
 	 * register at the end of the transfer. So, to have a logical
 	 * numbering, store the bytes in reverse order.
 	 */
-	u8			buffer[0];
-	struct gpio_desc	*gpiod_oe;
+	u8			buffer[];
 };
 
 static int __gen_74x164_write_config(struct gen_74x164_chip *chip)
@@ -117,10 +113,9 @@ static int gen_74x164_probe(struct spi_device *spi)
 	if (ret < 0)
 		return ret;
 
-	if (of_property_read_u32(spi->dev.of_node, "registers-number",
-				 &nregs)) {
-		dev_err(&spi->dev,
-			"Missing registers-number property in the DT.\n");
+	ret = device_property_read_u32(&spi->dev, "registers-number", &nregs);
+	if (ret) {
+		dev_err(&spi->dev, "Missing 'registers-number' property.\n");
 		return -EINVAL;
 	}
 

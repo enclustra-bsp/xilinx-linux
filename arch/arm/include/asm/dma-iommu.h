@@ -7,10 +7,7 @@
 #include <linux/mm_types.h>
 #include <linux/scatterlist.h>
 #include <linux/dma-debug.h>
-#include <linux/kmemcheck.h>
 #include <linux/kref.h>
-
-#define ARM_MAPPING_ERROR		(~(dma_addr_t)0x0)
 
 struct dma_iommu_mapping {
 	/* iommu specific data */

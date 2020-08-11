@@ -1,12 +1,10 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
 #
 # Kselftest Install
 # Install kselftest tests
 # Author: Shuah Khan <shuahkh@osg.samsung.com>
 # Copyright (C) 2015 Samsung Electronics Co., Ltd.
-
-# This software may be freely redistributed under the terms of the GNU
-# General Public License (GPLv2).
 
 install_loc=`pwd`
 
@@ -26,12 +24,12 @@ main()
 		echo "$0: Installing in specified location - $install_loc ..."
 	fi
 
-	install_dir=$install_loc/kselftest
+	install_dir=$install_loc/kselftest_install
 
 # Create install directory
 	mkdir -p $install_dir
 # Build tests
-	INSTALL_PATH=$install_dir make install
+	KSFT_INSTALL_PATH=$install_dir make install
 }
 
 main "$@"

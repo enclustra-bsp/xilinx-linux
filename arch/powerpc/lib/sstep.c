@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Single-step support.
  *
  * Copyright (C) 2004 Paul Mackerras <paulus@au.ibm.com>, IBM
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <linux/kernel.h>
 #include <linux/kprobes.h>
@@ -31,6 +27,8 @@ extern char system_call_common[];
 #define XER_SO		0x80000000U
 #define XER_OV		0x40000000U
 #define XER_CA		0x20000000U
+#define XER_OV32	0x00080000U
+#define XER_CA32	0x00040000U
 
 #ifdef CONFIG_PPC_FPU
 /*
@@ -278,7 +276,7 @@ static nokprobe_inline int read_mem_aligned(unsigned long *dest,
  * Copy from userspace to a buffer, using the largest possible
  * aligned accesses, up to sizeof(long).
  */
-static int nokprobe_inline copy_mem_in(u8 *dest, unsigned long ea, int nb,
+static nokprobe_inline int copy_mem_in(u8 *dest, unsigned long ea, int nb,
 				       struct pt_regs *regs)
 {
 	int err = 0;
@@ -383,7 +381,7 @@ static nokprobe_inline int write_mem_aligned(unsigned long val,
  * Copy from a buffer to userspace, using the largest possible
  * aligned accesses, up to sizeof(long).
  */
-static int nokprobe_inline copy_mem_out(u8 *dest, unsigned long ea, int nb,
+static nokprobe_inline int copy_mem_out(u8 *dest, unsigned long ea, int nb,
 					struct pt_regs *regs)
 {
 	int err = 0;
@@ -962,6 +960,16 @@ static nokprobe_inline void set_cr0(const struct pt_regs *regs,
 		op->ccval |= 0x20000000;
 }
 
+static nokprobe_inline void set_ca32(struct instruction_op *op, bool val)
+{
+	if (cpu_has_feature(CPU_FTR_ARCH_300)) {
+		if (val)
+			op->xerval |= XER_CA32;
+		else
+			op->xerval &= ~XER_CA32;
+	}
+}
+
 static nokprobe_inline void add_with_carry(const struct pt_regs *regs,
 				     struct instruction_op *op, int rd,
 				     unsigned long val1, unsigned long val2,
@@ -985,6 +993,9 @@ static nokprobe_inline void add_with_carry(const struct pt_regs *regs,
 		op->xerval |= XER_CA;
 	else
 		op->xerval &= ~XER_CA;
+
+	set_ca32(op, (unsigned int)val < (unsigned int)val1 ||
+			(carry_in && (unsigned int)val == (unsigned int)val1));
 }
 
 static nokprobe_inline void do_cmp_signed(const struct pt_regs *regs,
@@ -1050,9 +1061,10 @@ static nokprobe_inline void do_popcnt(const struct pt_regs *regs,
 {
 	unsigned long long out = v1;
 
-	out -= (out >> 1) & 0x5555555555555555;
-	out = (0x3333333333333333 & out) + (0x3333333333333333 & (out >> 2));
-	out = (out + (out >> 4)) & 0x0f0f0f0f0f0f0f0f;
+	out -= (out >> 1) & 0x5555555555555555ULL;
+	out = (0x3333333333333333ULL & out) +
+	      (0x3333333333333333ULL & (out >> 2));
+	out = (out + (out >> 4)) & 0x0f0f0f0f0f0f0f0fULL;
 
 	if (size == 8) {	/* popcntb */
 		op->val = out;
@@ -1061,7 +1073,7 @@ static nokprobe_inline void do_popcnt(const struct pt_regs *regs,
 	out += out >> 8;
 	out += out >> 16;
 	if (size == 32) {	/* popcntw */
-		op->val = out & 0x0000003f0000003f;
+		op->val = out & 0x0000003f0000003fULL;
 		return;
 	}
 
@@ -1099,7 +1111,7 @@ static nokprobe_inline void do_prty(const struct pt_regs *regs,
 
 	res ^= res >> 16;
 	if (size == 32) {		/* prtyw */
-		op->val = res & 0x0000000100000001;
+		op->val = res & 0x0000000100000001ULL;
 		return;
 	}
 
@@ -1153,7 +1165,7 @@ static nokprobe_inline int trap_compare(long v1, long v2)
 int analyse_instr(struct instruction_op *op, const struct pt_regs *regs,
 		  unsigned int instr)
 {
-	unsigned int opcode, ra, rb, rd, spr, u;
+	unsigned int opcode, ra, rb, rc, rd, spr, u;
 	unsigned long int imm;
 	unsigned long int val, val2;
 	unsigned int mb, me, sh;
@@ -1276,6 +1288,7 @@ int analyse_instr(struct instruction_op *op, const struct pt_regs *regs,
 	rd = (instr >> 21) & 0x1f;
 	ra = (instr >> 16) & 0x1f;
 	rb = (instr >> 11) & 0x1f;
+	rc = (instr >> 6) & 0x1f;
 
 	switch (opcode) {
 #ifdef __powerpc64__
@@ -1288,6 +1301,38 @@ int analyse_instr(struct instruction_op *op, const struct pt_regs *regs,
 		if (rd & trap_compare((int)regs->gpr[ra], (short) instr))
 			goto trap;
 		return 1;
+
+#ifdef __powerpc64__
+	case 4:
+		if (!cpu_has_feature(CPU_FTR_ARCH_300))
+			return -1;
+
+		switch (instr & 0x3f) {
+		case 48:	/* maddhd */
+			asm volatile(PPC_MADDHD(%0, %1, %2, %3) :
+				     "=r" (op->val) : "r" (regs->gpr[ra]),
+				     "r" (regs->gpr[rb]), "r" (regs->gpr[rc]));
+			goto compute_done;
+
+		case 49:	/* maddhdu */
+			asm volatile(PPC_MADDHDU(%0, %1, %2, %3) :
+				     "=r" (op->val) : "r" (regs->gpr[ra]),
+				     "r" (regs->gpr[rb]), "r" (regs->gpr[rc]));
+			goto compute_done;
+
+		case 51:	/* maddld */
+			asm volatile(PPC_MADDLD(%0, %1, %2, %3) :
+				     "=r" (op->val) : "r" (regs->gpr[ra]),
+				     "r" (regs->gpr[rb]), "r" (regs->gpr[rc]));
+			goto compute_done;
+		}
+
+		/*
+		 * There are other instructions from ISA 3.0 with the same
+		 * primary opcode which do not have emulation support yet.
+		 */
+		return -1;
+#endif
 
 	case 7:		/* mulli */
 		op->val = regs->gpr[ra] * (short) instr;
@@ -1655,10 +1700,23 @@ int analyse_instr(struct instruction_op *op, const struct pt_regs *regs,
 				(int) regs->gpr[rb];
 
 			goto arith_done;
-
+#ifdef __powerpc64__
+		case 265:	/* modud */
+			if (!cpu_has_feature(CPU_FTR_ARCH_300))
+				return -1;
+			op->val = regs->gpr[ra] % regs->gpr[rb];
+			goto compute_done;
+#endif
 		case 266:	/* add */
 			op->val = regs->gpr[ra] + regs->gpr[rb];
 			goto arith_done;
+
+		case 267:	/* moduw */
+			if (!cpu_has_feature(CPU_FTR_ARCH_300))
+				return -1;
+			op->val = (unsigned int) regs->gpr[ra] %
+				(unsigned int) regs->gpr[rb];
+			goto compute_done;
 #ifdef __powerpc64__
 		case 457:	/* divdu */
 			op->val = regs->gpr[ra] / regs->gpr[rb];
@@ -1678,6 +1736,42 @@ int analyse_instr(struct instruction_op *op, const struct pt_regs *regs,
 			op->val = (int) regs->gpr[ra] /
 				(int) regs->gpr[rb];
 			goto arith_done;
+
+		case 755:	/* darn */
+			if (!cpu_has_feature(CPU_FTR_ARCH_300))
+				return -1;
+			switch (ra & 0x3) {
+			case 0:
+				/* 32-bit conditioned */
+				asm volatile(PPC_DARN(%0, 0) : "=r" (op->val));
+				goto compute_done;
+
+			case 1:
+				/* 64-bit conditioned */
+				asm volatile(PPC_DARN(%0, 1) : "=r" (op->val));
+				goto compute_done;
+
+			case 2:
+				/* 64-bit raw */
+				asm volatile(PPC_DARN(%0, 2) : "=r" (op->val));
+				goto compute_done;
+			}
+
+			return -1;
+#ifdef __powerpc64__
+		case 777:	/* modsd */
+			if (!cpu_has_feature(CPU_FTR_ARCH_300))
+				return -1;
+			op->val = (long int) regs->gpr[ra] %
+				(long int) regs->gpr[rb];
+			goto compute_done;
+#endif
+		case 779:	/* modsw */
+			if (!cpu_has_feature(CPU_FTR_ARCH_300))
+				return -1;
+			op->val = (int) regs->gpr[ra] %
+				(int) regs->gpr[rb];
+			goto compute_done;
 
 
 /*
@@ -1749,6 +1843,20 @@ int analyse_instr(struct instruction_op *op, const struct pt_regs *regs,
 			do_popcnt(regs, op, regs->gpr[rd], 64);
 			goto logical_done_nocc;
 #endif
+		case 538:	/* cnttzw */
+			if (!cpu_has_feature(CPU_FTR_ARCH_300))
+				return -1;
+			val = (unsigned int) regs->gpr[rd];
+			op->val = (val ? __builtin_ctz(val) : 32);
+			goto logical_done;
+#ifdef __powerpc64__
+		case 570:	/* cnttzd */
+			if (!cpu_has_feature(CPU_FTR_ARCH_300))
+				return -1;
+			val = regs->gpr[rd];
+			op->val = (val ? __builtin_ctzl(val) : 64);
+			goto logical_done;
+#endif
 		case 922:	/* extsh */
 			op->val = (signed short) regs->gpr[rd];
 			goto logical_done;
@@ -1791,6 +1899,7 @@ int analyse_instr(struct instruction_op *op, const struct pt_regs *regs,
 				op->xerval |= XER_CA;
 			else
 				op->xerval &= ~XER_CA;
+			set_ca32(op, op->xerval & XER_CA);
 			goto logical_done;
 
 		case 824:	/* srawi */
@@ -1803,6 +1912,7 @@ int analyse_instr(struct instruction_op *op, const struct pt_regs *regs,
 				op->xerval |= XER_CA;
 			else
 				op->xerval &= ~XER_CA;
+			set_ca32(op, op->xerval & XER_CA);
 			goto logical_done;
 
 #ifdef __powerpc64__
@@ -1832,6 +1942,7 @@ int analyse_instr(struct instruction_op *op, const struct pt_regs *regs,
 				op->xerval |= XER_CA;
 			else
 				op->xerval &= ~XER_CA;
+			set_ca32(op, op->xerval & XER_CA);
 			goto logical_done;
 
 		case 826:	/* sradi with sh_5 = 0 */
@@ -1845,7 +1956,22 @@ int analyse_instr(struct instruction_op *op, const struct pt_regs *regs,
 				op->xerval |= XER_CA;
 			else
 				op->xerval &= ~XER_CA;
+			set_ca32(op, op->xerval & XER_CA);
 			goto logical_done;
+
+		case 890:	/* extswsli with sh_5 = 0 */
+		case 891:	/* extswsli with sh_5 = 1 */
+			if (!cpu_has_feature(CPU_FTR_ARCH_300))
+				return -1;
+			op->type = COMPUTE + SETREG;
+			sh = rb | ((instr & 2) << 4);
+			val = (signed int) regs->gpr[rd];
+			if (sh)
+				op->val = ROTATE(val, sh) & MASK64(0, 63 - sh);
+			else
+				op->val = val;
+			goto logical_done;
+
 #endif /* __powerpc64__ */
 
 /*
@@ -2525,6 +2651,15 @@ int analyse_instr(struct instruction_op *op, const struct pt_regs *regs,
 #endif /* __powerpc64__ */
 
 	}
+
+#ifdef CONFIG_VSX
+	if ((GETTYPE(op->type) == LOAD_VSX ||
+	     GETTYPE(op->type) == STORE_VSX) &&
+	    !cpu_has_feature(CPU_FTR_VSX)) {
+		return -1;
+	}
+#endif /* CONFIG_VSX */
+
 	return 0;
 
  logical_done:
@@ -2622,7 +2757,7 @@ void emulate_update_regs(struct pt_regs *regs, struct instruction_op *op)
 	unsigned long next_pc;
 
 	next_pc = truncate_if_32bit(regs->msr, regs->nip + 4);
-	switch (op->type & INSTR_TYPE_MASK) {
+	switch (GETTYPE(op->type)) {
 	case COMPUTE:
 		if (op->type & SETREG)
 			regs->gpr[op->reg] = op->val;
@@ -2698,6 +2833,7 @@ void emulate_update_regs(struct pt_regs *regs, struct instruction_op *op)
 	}
 	regs->nip = next_pc;
 }
+NOKPROBE_SYMBOL(emulate_update_regs);
 
 /*
  * Emulate a previously-analysed load or store instruction.
@@ -2719,7 +2855,7 @@ int emulate_loadstore(struct pt_regs *regs, struct instruction_op *op)
 
 	err = 0;
 	size = GETSIZE(op->type);
-	type = op->type & INSTR_TYPE_MASK;
+	type = GETTYPE(op->type);
 	cross_endian = (regs->msr & MSR_LE) != (MSR_KERNEL & MSR_LE);
 	ea = truncate_if_32bit(regs->msr, op->ea);
 
@@ -2981,7 +3117,7 @@ int emulate_step(struct pt_regs *regs, unsigned int instr)
 	}
 
 	err = 0;
-	type = op.type & INSTR_TYPE_MASK;
+	type = GETTYPE(op.type);
 
 	if (OP_IS_LOAD_STORE(type)) {
 		err = emulate_loadstore(regs, &op);

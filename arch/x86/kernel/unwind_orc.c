@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/module.h>
 #include <linux/sort.h>
 #include <asm/ptrace.h>
@@ -5,7 +6,6 @@
 #include <asm/unwind.h>
 #include <asm/orc_types.h>
 #include <asm/orc_lookup.h>
-#include <asm/sections.h>
 
 #define orc_warn(fmt, ...) \
 	printk_deferred_once(KERN_WARNING pr_fmt("WARNING: " fmt), ##__VA_ARGS__)
@@ -74,10 +74,79 @@ static struct orc_entry *orc_module_find(unsigned long ip)
 }
 #endif
 
+#ifdef CONFIG_DYNAMIC_FTRACE
+static struct orc_entry *orc_find(unsigned long ip);
+
+/*
+ * Ftrace dynamic trampolines do not have orc entries of their own.
+ * But they are copies of the ftrace entries that are static and
+ * defined in ftrace_*.S, which do have orc entries.
+ *
+ * If the unwinder comes across a ftrace trampoline, then find the
+ * ftrace function that was used to create it, and use that ftrace
+ * function's orc entry, as the placement of the return code in
+ * the stack will be identical.
+ */
+static struct orc_entry *orc_ftrace_find(unsigned long ip)
+{
+	struct ftrace_ops *ops;
+	unsigned long caller;
+
+	ops = ftrace_ops_trampoline(ip);
+	if (!ops)
+		return NULL;
+
+	if (ops->flags & FTRACE_OPS_FL_SAVE_REGS)
+		caller = (unsigned long)ftrace_regs_call;
+	else
+		caller = (unsigned long)ftrace_call;
+
+	/* Prevent unlikely recursion */
+	if (ip == caller)
+		return NULL;
+
+	return orc_find(caller);
+}
+#else
+static struct orc_entry *orc_ftrace_find(unsigned long ip)
+{
+	return NULL;
+}
+#endif
+
+/*
+ * If we crash with IP==0, the last successfully executed instruction
+ * was probably an indirect function call with a NULL function pointer,
+ * and we don't have unwind information for NULL.
+ * This hardcoded ORC entry for IP==0 allows us to unwind from a NULL function
+ * pointer into its parent and then continue normally from there.
+ */
+static struct orc_entry null_orc_entry = {
+	.sp_offset = sizeof(long),
+	.sp_reg = ORC_REG_SP,
+	.bp_reg = ORC_REG_UNDEFINED,
+	.type = ORC_TYPE_CALL
+};
+
+/* Fake frame pointer entry -- used as a fallback for generated code */
+static struct orc_entry orc_fp_entry = {
+	.type		= ORC_TYPE_CALL,
+	.sp_reg		= ORC_REG_BP,
+	.sp_offset	= 16,
+	.bp_reg		= ORC_REG_PREV_SP,
+	.bp_offset	= -16,
+	.end		= 0,
+};
+
 static struct orc_entry *orc_find(unsigned long ip)
 {
+	static struct orc_entry *orc;
+
 	if (!orc_init)
 		return NULL;
+
+	if (ip == 0)
+		return &null_orc_entry;
 
 	/* For non-init vmlinux addresses, use the fast lookup table: */
 	if (ip >= LOOKUP_START_IP && ip < LOOKUP_STOP_IP) {
@@ -106,12 +175,16 @@ static struct orc_entry *orc_find(unsigned long ip)
 	}
 
 	/* vmlinux .init slow lookup: */
-	if (ip >= (unsigned long)_sinittext && ip < (unsigned long)_einittext)
+	if (init_kernel_text(ip))
 		return __orc_find(__start_orc_unwind_ip, __start_orc_unwind,
 				  __stop_orc_unwind_ip - __start_orc_unwind_ip, ip);
 
 	/* Module lookup: */
-	return orc_module_find(ip);
+	orc = orc_module_find(ip);
+	if (orc)
+		return orc;
+
+	return orc_ftrace_find(ip);
 }
 
 static void orc_sort_swap(void *_a, void *_b, int size)
@@ -153,7 +226,7 @@ static int orc_sort_cmp(const void *_a, const void *_b)
 	 * whitelisted .o files which didn't get objtool generation.
 	 */
 	orc_a = cur_orc_table + (a - cur_orc_ip_table);
-	return orc_a->sp_reg == ORC_REG_UNDEFINED ? -1 : 1;
+	return orc_a->sp_reg == ORC_REG_UNDEFINED && !orc_a->end ? -1 : 1;
 }
 
 #ifdef CONFIG_MODULES
@@ -253,22 +326,15 @@ unsigned long *unwind_get_return_address_ptr(struct unwind_state *state)
 	return NULL;
 }
 
-static bool stack_access_ok(struct unwind_state *state, unsigned long addr,
+static bool stack_access_ok(struct unwind_state *state, unsigned long _addr,
 			    size_t len)
 {
 	struct stack_info *info = &state->stack_info;
+	void *addr = (void *)_addr;
 
-	/*
-	 * If the address isn't on the current stack, switch to the next one.
-	 *
-	 * We may have to traverse multiple stacks to deal with the possibility
-	 * that info->next_sp could point to an empty stack and the address
-	 * could be on a subsequent stack.
-	 */
-	while (!on_stack(info, (void *)addr, len))
-		if (get_stack_info(info->next_sp, state->task, info,
-				   &state->stack_mask))
-			return false;
+	if (!on_stack(info, addr, len) &&
+	    (get_stack_info(addr, state->task, info, &state->stack_mask)))
+		return false;
 
 	return true;
 }
@@ -283,51 +349,40 @@ static bool deref_stack_reg(struct unwind_state *state, unsigned long addr,
 	return true;
 }
 
-#define REGS_SIZE (sizeof(struct pt_regs))
-#define SP_OFFSET (offsetof(struct pt_regs, sp))
-#define IRET_REGS_SIZE (REGS_SIZE - offsetof(struct pt_regs, ip))
-#define IRET_SP_OFFSET (SP_OFFSET - offsetof(struct pt_regs, ip))
-
 static bool deref_stack_regs(struct unwind_state *state, unsigned long addr,
-			     unsigned long *ip, unsigned long *sp, bool full)
+			     unsigned long *ip, unsigned long *sp)
 {
-	size_t regs_size = full ? REGS_SIZE : IRET_REGS_SIZE;
-	size_t sp_offset = full ? SP_OFFSET : IRET_SP_OFFSET;
-	struct pt_regs *regs = (struct pt_regs *)(addr + regs_size - REGS_SIZE);
+	struct pt_regs *regs = (struct pt_regs *)addr;
 
-	if (IS_ENABLED(CONFIG_X86_64)) {
-		if (!stack_access_ok(state, addr, regs_size))
-			return false;
+	/* x86-32 support will be more complicated due to the &regs->sp hack */
+	BUILD_BUG_ON(IS_ENABLED(CONFIG_X86_32));
 
-		*ip = regs->ip;
-		*sp = regs->sp;
-
-		return true;
-	}
-
-	if (!stack_access_ok(state, addr, sp_offset))
+	if (!stack_access_ok(state, addr, sizeof(struct pt_regs)))
 		return false;
 
 	*ip = regs->ip;
+	*sp = regs->sp;
+	return true;
+}
 
-	if (user_mode(regs)) {
-		if (!stack_access_ok(state, addr + sp_offset,
-				     REGS_SIZE - SP_OFFSET))
-			return false;
+static bool deref_stack_iret_regs(struct unwind_state *state, unsigned long addr,
+				  unsigned long *ip, unsigned long *sp)
+{
+	struct pt_regs *regs = (void *)addr - IRET_FRAME_OFFSET;
 
-		*sp = regs->sp;
-	} else
-		*sp = (unsigned long)&regs->sp;
+	if (!stack_access_ok(state, addr, IRET_FRAME_SIZE))
+		return false;
 
+	*ip = regs->ip;
+	*sp = regs->sp;
 	return true;
 }
 
 bool unwind_next_frame(struct unwind_state *state)
 {
-	unsigned long ip_p, sp, orig_ip, prev_sp = state->sp;
+	unsigned long ip_p, sp, orig_ip = state->ip, prev_sp = state->sp;
 	enum stack_type prev_type = state->stack_info.type;
 	struct orc_entry *orc;
-	struct pt_regs *ptregs;
 	bool indirect = false;
 
 	if (unwind_done(state))
@@ -336,9 +391,9 @@ bool unwind_next_frame(struct unwind_state *state)
 	/* Don't let modules unload while we're reading their ORC data. */
 	preempt_disable();
 
-	/* Have we reached the end? */
+	/* End-of-stack check for user tasks: */
 	if (state->regs && user_mode(state->regs))
-		goto done;
+		goto the_end;
 
 	/*
 	 * Find the orc_entry associated with the text address.
@@ -347,9 +402,24 @@ bool unwind_next_frame(struct unwind_state *state)
 	 * calls and calls to noreturn functions.
 	 */
 	orc = orc_find(state->signal ? state->ip : state->ip - 1);
-	if (!orc || orc->sp_reg == ORC_REG_UNDEFINED)
-		goto done;
-	orig_ip = state->ip;
+	if (!orc) {
+		/*
+		 * As a fallback, try to assume this code uses a frame pointer.
+		 * This is useful for generated code, like BPF, which ORC
+		 * doesn't know about.  This is just a guess, so the rest of
+		 * the unwind is no longer considered reliable.
+		 */
+		orc = &orc_fp_entry;
+		state->error = true;
+	}
+
+	/* End-of-stack check for kernel threads: */
+	if (orc->sp_reg == ORC_REG_UNDEFINED) {
+		if (!orc->end)
+			goto err;
+
+		goto the_end;
+	}
 
 	/* Find the previous frame's stack: */
 	switch (orc->sp_reg) {
@@ -375,7 +445,7 @@ bool unwind_next_frame(struct unwind_state *state)
 		if (!state->regs || !state->full_regs) {
 			orc_warn("missing regs for base reg R10 at ip %pB\n",
 				 (void *)state->ip);
-			goto done;
+			goto err;
 		}
 		sp = state->regs->r10;
 		break;
@@ -384,7 +454,7 @@ bool unwind_next_frame(struct unwind_state *state)
 		if (!state->regs || !state->full_regs) {
 			orc_warn("missing regs for base reg R13 at ip %pB\n",
 				 (void *)state->ip);
-			goto done;
+			goto err;
 		}
 		sp = state->regs->r13;
 		break;
@@ -393,7 +463,7 @@ bool unwind_next_frame(struct unwind_state *state)
 		if (!state->regs || !state->full_regs) {
 			orc_warn("missing regs for base reg DI at ip %pB\n",
 				 (void *)state->ip);
-			goto done;
+			goto err;
 		}
 		sp = state->regs->di;
 		break;
@@ -402,7 +472,7 @@ bool unwind_next_frame(struct unwind_state *state)
 		if (!state->regs || !state->full_regs) {
 			orc_warn("missing regs for base reg DX at ip %pB\n",
 				 (void *)state->ip);
-			goto done;
+			goto err;
 		}
 		sp = state->regs->dx;
 		break;
@@ -410,12 +480,12 @@ bool unwind_next_frame(struct unwind_state *state)
 	default:
 		orc_warn("unknown SP base reg %d for ip %pB\n",
 			 orc->sp_reg, (void *)state->ip);
-		goto done;
+		goto err;
 	}
 
 	if (indirect) {
 		if (!deref_stack_reg(state, sp, &sp))
-			goto done;
+			goto err;
 	}
 
 	/* Find IP, SP and possibly regs: */
@@ -424,7 +494,7 @@ bool unwind_next_frame(struct unwind_state *state)
 		ip_p = sp - sizeof(long);
 
 		if (!deref_stack_reg(state, ip_p, &state->ip))
-			goto done;
+			goto err;
 
 		state->ip = ftrace_graph_ret_addr(state->task, &state->graph_idx,
 						  state->ip, (void *)ip_p);
@@ -435,10 +505,10 @@ bool unwind_next_frame(struct unwind_state *state)
 		break;
 
 	case ORC_TYPE_REGS:
-		if (!deref_stack_regs(state, sp, &state->ip, &state->sp, true)) {
+		if (!deref_stack_regs(state, sp, &state->ip, &state->sp)) {
 			orc_warn("can't dereference registers at %p for ip %pB\n",
 				 (void *)sp, (void *)orig_ip);
-			goto done;
+			goto err;
 		}
 
 		state->regs = (struct pt_regs *)sp;
@@ -447,20 +517,14 @@ bool unwind_next_frame(struct unwind_state *state)
 		break;
 
 	case ORC_TYPE_REGS_IRET:
-		if (!deref_stack_regs(state, sp, &state->ip, &state->sp, false)) {
+		if (!deref_stack_iret_regs(state, sp, &state->ip, &state->sp)) {
 			orc_warn("can't dereference iret registers at %p for ip %pB\n",
 				 (void *)sp, (void *)orig_ip);
-			goto done;
+			goto err;
 		}
 
-		ptregs = container_of((void *)sp, struct pt_regs, ip);
-		if ((unsigned long)ptregs >= prev_sp &&
-		    on_stack(&state->stack_info, ptregs, REGS_SIZE)) {
-			state->regs = ptregs;
-			state->full_regs = false;
-		} else
-			state->regs = NULL;
-
+		state->regs = (void *)sp - IRET_FRAME_OFFSET;
+		state->full_regs = false;
 		state->signal = true;
 		break;
 
@@ -479,18 +543,18 @@ bool unwind_next_frame(struct unwind_state *state)
 
 	case ORC_REG_PREV_SP:
 		if (!deref_stack_reg(state, sp + orc->bp_offset, &state->bp))
-			goto done;
+			goto err;
 		break;
 
 	case ORC_REG_BP:
 		if (!deref_stack_reg(state, state->bp + orc->bp_offset, &state->bp))
-			goto done;
+			goto err;
 		break;
 
 	default:
 		orc_warn("unknown BP base reg %d for ip %pB\n",
 			 orc->bp_reg, (void *)orig_ip);
-		goto done;
+		goto err;
 	}
 
 	/* Prevent a recursive loop due to bad ORC data: */
@@ -499,13 +563,16 @@ bool unwind_next_frame(struct unwind_state *state)
 	    state->sp <= prev_sp) {
 		orc_warn("stack going in the wrong direction? ip=%pB\n",
 			 (void *)orig_ip);
-		goto done;
+		goto err;
 	}
 
 	preempt_enable();
 	return true;
 
-done:
+err:
+	state->error = true;
+
+the_end:
 	preempt_enable();
 	state->stack_info.type = STACK_TYPE_UNKNOWN;
 	return false;
@@ -531,7 +598,7 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 			goto done;
 
 		state->ip = regs->ip;
-		state->sp = kernel_stack_pointer(regs);
+		state->sp = regs->sp;
 		state->bp = regs->bp;
 		state->regs = regs;
 		state->full_regs = true;
@@ -553,8 +620,18 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 	}
 
 	if (get_stack_info((unsigned long *)state->sp, state->task,
-			   &state->stack_info, &state->stack_mask))
-		return;
+			   &state->stack_info, &state->stack_mask)) {
+		/*
+		 * We weren't on a valid stack.  It's possible that
+		 * we overflowed a valid stack into a guard page.
+		 * See if the next page up is valid so that we can
+		 * generate some kind of backtrace if this happens.
+		 */
+		void *next_page = (void *)PAGE_ALIGN((unsigned long)state->sp);
+		if (get_stack_info(next_page, state->task, &state->stack_info,
+				   &state->stack_mask))
+			return;
+	}
 
 	/*
 	 * The caller can provide the address of the first frame directly

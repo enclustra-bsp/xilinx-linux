@@ -33,6 +33,7 @@
 #include <linux/spinlock.h>
 #include <linux/spinlock_types.h>
 #include <linux/types.h>
+#include <linux/v4l2-dv-timings.h>
 #include <linux/v4l2-subdev.h>
 #include <linux/xilinx-sdirxss.h>
 #include <linux/xilinx-v4l2-controls.h>
@@ -78,6 +79,9 @@
 #define XSDIRX_RST_CTRL_RST_EDH_ERRCNT_MASK		BIT(3)
 #define XSDIRX_RST_CTRL_SDIRX_BRIDGE_ENB_MASK		BIT(8)
 #define XSDIRX_RST_CTRL_VIDIN_AXI4S_MOD_ENB_MASK	BIT(9)
+#define XSDIRX_RST_CTRL_BRIDGE_CH_FMT_OFFSET		10
+#define XSDIRX_RST_CTRL_BRIDGE_CH_FMT_MASK		GENMASK(12, 10)
+#define XSDIRX_RST_CTRL_BRIDGE_CH_FMT_YUV444		1
 
 #define XSDIRX_MDL_CTRL_FRM_EN_MASK		BIT(4)
 #define XSDIRX_MDL_CTRL_MODE_DET_EN_MASK	BIT(5)
@@ -171,9 +175,6 @@
 #define XSDIRX_STAT_SB_RX_TDATA_GT_RESETDONE_MASK	BIT(2)
 #define XSDIRX_STAT_SB_RX_TDATA_GT_BITRATE_MASK		BIT(3)
 
-/* Number of media pads */
-#define XSDIRX_MEDIA_PADS	(1)
-
 #define XSDIRX_DEFAULT_WIDTH	(1920)
 #define XSDIRX_DEFAULT_HEIGHT	(1080)
 
@@ -192,9 +193,7 @@
 #define XSDIRX_MODE_12GI_MASK	0x5
 #define XSDIRX_MODE_12GF_MASK	0x6
 
-/*
- * Maximum number of events per file handle.
- */
+/* Maximum number of events per file handle. */
 #define XSDIRX_MAX_EVENTS	(128)
 
 /* ST352 related macros */
@@ -212,6 +211,7 @@
 #define XST352_BYTE1_ST372_2x720L_3GB		0x8B
 #define XST352_BYTE1_ST372_2x1080L_3GB		0x8C
 #define XST352_BYTE1_ST2081_10_2160L_6G		0xC0
+#define XST352_BYTE1_ST2081_10_2_1080L_6G	0xC1
 #define XST352_BYTE1_ST2081_10_DL_2160L_6G	0xC2
 #define XST352_BYTE1_ST2082_10_2160L_12G	0xCE
 
@@ -246,7 +246,16 @@
 #define XST352_BYTE3_COLOR_FORMAT_MASK		GENMASK(19, 16)
 #define XST352_BYTE3_COLOR_FORMAT_OFFSET	16
 #define XST352_BYTE3_COLOR_FORMAT_422		0x0
+#define XST352_BYTE3_COLOR_FORMAT_YUV444	0x1
 #define XST352_BYTE3_COLOR_FORMAT_420		0x3
+#define XST352_BYTE3_COLOR_FORMAT_GBR		0x2
+
+#define XST352_BYTE4_BIT_DEPTH_MASK		GENMASK(25, 24)
+#define XST352_BYTE4_BIT_DEPTH_OFFSET		24
+#define XST352_BYTE4_BIT_DEPTH_10		0x1
+#define XST352_BYTE4_BIT_DEPTH_12		0x2
+
+#define CLK_INT		148500000UL
 
 /**
  * enum sdi_family_enc - SDI Transport Video Format Detected with Active Pixels
@@ -275,9 +284,10 @@ enum sdi_family_enc {
  * @irq: requested irq number
  * @include_edh: EDH processor presence
  * @mode: 3G/6G/12G mode
- * @axi_clk: Axi lite interface clock
- * @sdirx_clk: SDI Rx GT clock
- * @vidout_clk: Video clock
+ * @clks: array of clocks
+ * @num_clks: number of clocks
+ * @rst_gt_gpio: reset gt gpio (fmc init done)
+ * @bpc: Bits per component, can be 10 or 12
  */
 struct xsdirxss_core {
 	struct device *dev;
@@ -285,9 +295,10 @@ struct xsdirxss_core {
 	int irq;
 	bool include_edh;
 	int mode;
-	struct clk *axi_clk;
-	struct clk *sdirx_clk;
-	struct clk *vidout_clk;
+	struct clk_bulk_data *clks;
+	int num_clks;
+	struct gpio_desc *rst_gt_gpio;
+	u32 bpc;
 };
 
 /**
@@ -296,14 +307,18 @@ struct xsdirxss_core {
  * @subdev: The v4l2 subdev structure
  * @ctrl_handler: control handler
  * @event: Holds the video unlock event
- * @formats: Active V4L2 formats on each pad
+ * @format: Active V4L2 format on source pad
  * @default_format: default V4L2 media bus format
  * @frame_interval: Captures the frame rate
  * @vip_format: format information corresponding to the active format
- * @pads: media pads
+ * @pad: source media pad
+ * @vidlockwin: Video lock window value set by control
+ * @edhmask: EDH mask set by control
+ * @searchmask: Search mask set by control
  * @streaming: Flag for storing streaming state
  * @vidlocked: Flag indicating SDI Rx has locked onto video stream
  * @ts_is_interlaced: Flag indicating Transport Stream is interlaced.
+ * @framer_enable: Flag for framer enabled or not set by control
  *
  * This structure contains the device driver related parameters
  */
@@ -312,14 +327,296 @@ struct xsdirxss_state {
 	struct v4l2_subdev subdev;
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_event event;
-	struct v4l2_mbus_framefmt formats[XSDIRX_MEDIA_PADS];
+	struct v4l2_mbus_framefmt format;
 	struct v4l2_mbus_framefmt default_format;
 	struct v4l2_fract frame_interval;
 	const struct xvip_video_format *vip_format;
-	struct media_pad pads[XSDIRX_MEDIA_PADS];
+	struct media_pad pad;
+	u32 vidlockwin;
+	u32 edhmask;
+	u16 searchmask;
 	bool streaming;
 	bool vidlocked;
 	bool ts_is_interlaced;
+	bool framer_enable;
+};
+
+/* List of clocks required by UHD-SDI Rx subsystem */
+static const char * const xsdirxss_clks[] = {
+	"s_axi_aclk", "sdi_rx_clk", "video_out_clk",
+};
+
+static const u32 xsdirxss_10bpc_mbus_fmts[] = {
+	MEDIA_BUS_FMT_UYVY10_1X20,
+	MEDIA_BUS_FMT_VYYUYY10_4X20,
+	MEDIA_BUS_FMT_VUY10_1X30,
+	MEDIA_BUS_FMT_RBG101010_1X30,
+};
+
+static const u32 xsdirxss_12bpc_mbus_fmts[] = {
+	MEDIA_BUS_FMT_UYVY12_1X24,
+	MEDIA_BUS_FMT_UYYVYY12_4X24,
+	MEDIA_BUS_FMT_VUY12_1X36,
+	MEDIA_BUS_FMT_RBG121212_1X36,
+};
+
+#define XLNX_V4L2_DV_BT_2048X1080P24 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(2048, 1080, 0, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		74250000, 510, 44, 148, 4, 5, 36, 0, 0, 0, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_2048X1080P25 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(2048, 1080, 0, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		74250000, 400, 44, 148, 4, 5, 36, 0, 0, 0, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_2048X1080P30 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(2048, 1080, 0, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		74250000, 66, 20, 66, 4, 5, 36, 0, 0, 0, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_2048X1080I48 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(2048, 1080, 1, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		74250000, 329, 44, 329, 2, 5, 15, 3, 5, 15, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_2048X1080I50 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(2048, 1080, 1, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		74250000, 274, 44, 274, 2, 5, 15, 3, 5, 15, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_2048X1080I60 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(2048, 1080, 1, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		74250000, 66, 20, 66, 2, 5, 15, 3, 5, 15, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_1920X1080P48 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(1920, 1080, 0, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		148500000, 638, 44, 148, 4, 5, 36, 0, 0, 0, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_2048X1080P48 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(2048, 1080, 0, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		148500000, 510, 44, 148, 4, 5, 36, 0, 0, 0, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_2048X1080P50 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(2048, 1080, 0, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		148500000, 400, 44, 148, 4, 5, 36, 0, 0, 0, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_2048X1080P60 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(2048, 1080, 0, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		148500000, 88, 44, 20, 4, 5, 36, 0, 0, 0, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_3840X2160P48 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(3840, 2160, 0, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		594000000, 1276, 88, 296, 8, 10, 72, 0, 0, 0, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_4096X2160P48 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(4096, 2160, 0, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		594000000, 1020, 88, 296, 8, 10, 72, 0, 0, 0, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+#define XLNX_V4L2_DV_BT_1920X1080I48 { \
+	.type = V4L2_DV_BT_656_1120, \
+	V4L2_INIT_BT_TIMINGS(1920, 1080, 1, \
+		V4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \
+		148500000, 371, 88, 371, 2, 5, 15, 3, 5, 15, \
+		V4L2_DV_BT_STD_SDI) \
+}
+
+static const struct v4l2_dv_timings fmt_cap[] = {
+	V4L2_DV_BT_SDI_720X487I60,
+	V4L2_DV_BT_CEA_720X576I50,
+	V4L2_DV_BT_CEA_1280X720P24,
+	V4L2_DV_BT_CEA_1280X720P25,
+	V4L2_DV_BT_CEA_1280X720P30,
+	V4L2_DV_BT_CEA_1280X720P50,
+	V4L2_DV_BT_CEA_1280X720P60,
+	V4L2_DV_BT_CEA_1920X1080P24,
+	V4L2_DV_BT_CEA_1920X1080P30,
+	V4L2_DV_BT_CEA_1920X1080I50,
+	V4L2_DV_BT_CEA_1920X1080I60,
+	V4L2_DV_BT_CEA_1920X1080P50,
+	V4L2_DV_BT_CEA_1920X1080P60,
+	V4L2_DV_BT_CEA_3840X2160P24,
+	V4L2_DV_BT_CEA_3840X2160P30,
+	V4L2_DV_BT_CEA_3840X2160P50,
+	V4L2_DV_BT_CEA_3840X2160P60,
+	V4L2_DV_BT_CEA_4096X2160P24,
+	V4L2_DV_BT_CEA_4096X2160P25,
+	V4L2_DV_BT_CEA_4096X2160P30,
+	V4L2_DV_BT_CEA_4096X2160P50,
+	V4L2_DV_BT_CEA_4096X2160P60,
+
+	XLNX_V4L2_DV_BT_2048X1080P24,
+	XLNX_V4L2_DV_BT_2048X1080P25,
+	XLNX_V4L2_DV_BT_2048X1080P30,
+	XLNX_V4L2_DV_BT_2048X1080I48,
+	XLNX_V4L2_DV_BT_2048X1080I50,
+	XLNX_V4L2_DV_BT_2048X1080I60,
+	XLNX_V4L2_DV_BT_2048X1080P48,
+	XLNX_V4L2_DV_BT_2048X1080P50,
+	XLNX_V4L2_DV_BT_2048X1080P60,
+	XLNX_V4L2_DV_BT_1920X1080P48,
+	XLNX_V4L2_DV_BT_1920X1080I48,
+	XLNX_V4L2_DV_BT_3840X2160P48,
+	XLNX_V4L2_DV_BT_4096X2160P48,
+};
+
+struct xsdirxss_dv_map {
+	u32 width;
+	u32 height;
+	u32 fps;
+	struct v4l2_dv_timings format;
+};
+
+static const struct xsdirxss_dv_map xsdirxss_dv_timings[] = {
+	/* SD - 720x487i60 */
+	{ 720, 243, 30, V4L2_DV_BT_SDI_720X487I60 },
+	/* SD - 720x576i50 */
+	{ 720, 288, 25, V4L2_DV_BT_CEA_720X576I50 },
+	/* HD - 1280x720p23.98 */
+	/* HD - 1280x720p24 */
+	{ 1280, 720, 24, V4L2_DV_BT_CEA_1280X720P24 },
+	/* HD - 1280x720p25 */
+	{ 1280, 720, 25, V4L2_DV_BT_CEA_1280X720P25 },
+	/* HD - 1280x720p29.97 */
+	/* HD - 1280x720p30 */
+	{ 1280, 720, 30, V4L2_DV_BT_CEA_1280X720P30 },
+	/* HD - 1280x720p50 */
+	{ 1280, 720, 50, V4L2_DV_BT_CEA_1280X720P50 },
+	/* HD - 1280x720p59.94 */
+	/* HD - 1280x720p60 */
+	{ 1280, 720, 60, V4L2_DV_BT_CEA_1280X720P60 },
+	/* HD - 1920x1080p23.98 */
+	/* HD - 1920x1080p24 */
+	{ 1920, 1080, 24, V4L2_DV_BT_CEA_1920X1080P24 },
+	/* HD - 1920x1080p25 */
+	{ 1920, 1080, 25, V4L2_DV_BT_CEA_1920X1080P25 },
+	/* HD - 1920x1080p29.97 */
+	/* HD - 1920x1080p30 */
+	{ 1920, 1080, 30, V4L2_DV_BT_CEA_1920X1080P30 },
+
+	/* HD - 2048x1080p23.98 */
+	/* HD - 2048x1080p24 */
+	{ 2048, 1080, 24, XLNX_V4L2_DV_BT_2048X1080P24 },
+	/* HD - 2048x1080p25 */
+	{ 2048, 1080, 24, XLNX_V4L2_DV_BT_2048X1080P25 },
+	/* HD - 2048x1080p29.97 */
+	/* HD - 2048x1080p30 */
+	{ 2048, 1080, 24, XLNX_V4L2_DV_BT_2048X1080P30 },
+	/* HD - 1920x1080i47.95 */
+	/* HD - 1920x1080i48 */
+	{ 1920, 540, 24, XLNX_V4L2_DV_BT_1920X1080I48 },
+
+	/* HD - 1920x1080i50 */
+	{ 1920, 540, 25, V4L2_DV_BT_CEA_1920X1080I50 },
+	/* HD - 1920x1080i59.94 */
+	/* HD - 1920x1080i60 */
+	{ 1920, 540, 30, V4L2_DV_BT_CEA_1920X1080I60 },
+
+	/* HD - 2048x1080i47.95 */
+	/* HD - 2048x1080i48 */
+	{ 2048, 540, 24, XLNX_V4L2_DV_BT_2048X1080I48 },
+	/* HD - 2048x1080i50 */
+	{ 2048, 540, 25, XLNX_V4L2_DV_BT_2048X1080I50 },
+	/* HD - 2048x1080i59.94 */
+	/* HD - 2048x1080i60 */
+	{ 2048, 540, 30, XLNX_V4L2_DV_BT_2048X1080I60 },
+	/* 3G - 1920x1080p47.95 */
+	/* 3G - 1920x1080p48 */
+	{ 1920, 1080, 48, XLNX_V4L2_DV_BT_1920X1080P48 },
+
+	/* 3G - 1920x1080p50 148.5 */
+	{ 1920, 1080, 50, V4L2_DV_BT_CEA_1920X1080P50 },
+	/* 3G - 1920x1080p59.94 148.5/1.001 */
+	/* 3G - 1920x1080p60 148.5 */
+	{ 1920, 1080, 60, V4L2_DV_BT_CEA_1920X1080P60 },
+
+	/* 3G - 2048x1080p47.95 */
+	/* 3G - 2048x1080p48 */
+	{ 2048, 1080, 48, XLNX_V4L2_DV_BT_2048X1080P48 },
+	/* 3G - 2048x1080p50 */
+	{ 2048, 1080, 50, XLNX_V4L2_DV_BT_2048X1080P50 },
+	/* 3G - 2048x1080p59.94 */
+	/* 3G - 2048x1080p60 */
+	{ 2048, 1080, 60, XLNX_V4L2_DV_BT_2048X1080P60 },
+
+	/* 6G - 3840X2160p23.98 */
+	/* 6G - 3840X2160p24 */
+	{ 3840, 2160, 24, V4L2_DV_BT_CEA_3840X2160P24 },
+	/* 6G - 3840X2160p25 */
+	{ 3840, 2160, 25, V4L2_DV_BT_CEA_3840X2160P25 },
+	/* 6G - 3840X2160p29.97 */
+	/* 6G - 3840X2160p30 */
+	{ 3840, 2160, 30, V4L2_DV_BT_CEA_3840X2160P30 },
+	/* 6G - 4096X2160p23.98 */
+	/* 6G - 4096X2160p24 */
+	{ 4096, 2160, 24, V4L2_DV_BT_CEA_4096X2160P24 },
+	/* 6G - 4096X2160p25 */
+	{ 4096, 2160, 25, V4L2_DV_BT_CEA_4096X2160P25 },
+	/* 6G - 4096X2160p29.97 */
+	/* 6G - 4096X2160p30 */
+	{ 4096, 2160, 30, V4L2_DV_BT_CEA_4096X2160P30 },
+	/* 12G - 3840X2160p47.95 */
+	/* 12G - 3840X2160p48 */
+	{ 3840, 2160, 48, XLNX_V4L2_DV_BT_3840X2160P48 },
+
+	/* 12G - 3840X2160p50 */
+	{ 3840, 2160, 50, V4L2_DV_BT_CEA_3840X2160P50 },
+	/* 12G - 3840X2160p59.94 */
+	/* 12G - 3840X2160p60 */
+	{ 3840, 2160, 60, V4L2_DV_BT_CEA_3840X2160P60 },
+
+	/* 12G - 4096X2160p47.95 */
+	/* 12G - 4096X2160p48 */
+	{ 3840, 2160, 48, XLNX_V4L2_DV_BT_4096X2160P48 },
+
+	/* 12G - 4096X2160p50 */
+	{ 4096, 2160, 50, V4L2_DV_BT_CEA_4096X2160P50 },
+	/* 12G - 4096X2160p59.94 */
+	/* 12G - 4096X2160p60 */
+	{ 4096, 2160, 60, V4L2_DV_BT_CEA_4096X2160P60 },
 };
 
 static inline struct xsdirxss_state *
@@ -354,14 +651,21 @@ static inline void xsdirxss_set(struct xsdirxss_core *xsdirxss, u32 addr,
 	xsdirxss_write(xsdirxss, addr, xsdirxss_read(xsdirxss, addr) | set);
 }
 
-static void xsdirx_core_disable(struct xsdirxss_core *core)
+static inline void xsdirx_core_disable(struct xsdirxss_core *core)
 {
 	xsdirxss_clr(core, XSDIRX_RST_CTRL_REG, XSDIRX_RST_CTRL_SS_EN_MASK);
 }
 
-static void xsdirx_core_enable(struct xsdirxss_core *core)
+static inline void xsdirx_core_enable(struct xsdirxss_core *core)
 {
 	xsdirxss_set(core, XSDIRX_RST_CTRL_REG, XSDIRX_RST_CTRL_SS_EN_MASK);
+}
+
+static void xsdirxss_gt_reset(struct xsdirxss_core *core)
+{
+	gpiod_set_value(core->rst_gt_gpio, 0x1);
+	udelay(1);
+	gpiod_set_value(core->rst_gt_gpio, 0x0);
 }
 
 static int xsdirx_set_modedetect(struct xsdirxss_core *core, u16 mask)
@@ -377,9 +681,9 @@ static int xsdirx_set_modedetect(struct xsdirxss_core *core, u16 mask)
 	dev_dbg(core->dev, "mask = 0x%x\n", mask);
 
 	val = xsdirxss_read(core, XSDIRX_MDL_CTRL_REG);
-	val &= ~(XSDIRX_MDL_CTRL_MODE_DET_EN_MASK);
-	val &= ~(XSDIRX_MDL_CTRL_MODE_AUTO_DET_MASK);
-	val &= ~(XSDIRX_MDL_CTRL_FORCED_MODE_MASK);
+	val &= ~XSDIRX_MDL_CTRL_MODE_DET_EN_MASK;
+	val &= ~XSDIRX_MDL_CTRL_MODE_AUTO_DET_MASK;
+	val &= ~XSDIRX_MDL_CTRL_FORCED_MODE_MASK;
 
 	if (hweight16(mask) > 1) {
 		/* Multi mode detection as more than 1 bit set in mask */
@@ -409,7 +713,7 @@ static int xsdirx_set_modedetect(struct xsdirxss_core *core, u16 mask)
 		val |= XSDIRX_MDL_CTRL_MODE_DET_EN_MASK;
 	} else {
 		/* Fixed Mode */
-		u32 forced_mode_mask = 0;
+		u32 forced_mode_mask;
 
 		dev_dbg(core->dev, "Detect fixed mode\n");
 
@@ -433,6 +737,8 @@ static int xsdirx_set_modedetect(struct xsdirxss_core *core, u16 mask)
 		case XSDIRX_MODE_12GF_OFFSET:
 			forced_mode_mask = XSDIRX_MODE_12GF_MASK;
 			break;
+		default:
+			forced_mode_mask = 0;
 		}
 		dev_dbg(core->dev, "Forced Mode Mask : 0x%x\n",
 			forced_mode_mask);
@@ -465,7 +771,7 @@ static void xsdirx_setedherrcnttrigger(struct xsdirxss_core *core, u32 enable)
 	xsdirxss_write(core, XSDIRX_EDH_ERRCNT_EN_REG, val);
 }
 
-static void xsdirx_setvidlockwindow(struct xsdirxss_core *core, u32 val)
+static inline void xsdirx_setvidlockwindow(struct xsdirxss_core *core, u32 val)
 {
 	/*
 	 * The video lock window is the amount of time for which the
@@ -475,12 +781,12 @@ static void xsdirx_setvidlockwindow(struct xsdirxss_core *core, u32 val)
 	xsdirxss_write(core, XSDIRX_VID_LOCK_WINDOW_REG, val);
 }
 
-static void xsdirx_disableintr(struct xsdirxss_core *core, u32 mask)
+static inline void xsdirx_disableintr(struct xsdirxss_core *core, u32 mask)
 {
 	xsdirxss_clr(core, XSDIRX_IER_REG, mask);
 }
 
-static void xsdirx_enableintr(struct xsdirxss_core *core, u32 mask)
+static inline void xsdirx_enableintr(struct xsdirxss_core *core, u32 mask)
 {
 	xsdirxss_set(core, XSDIRX_IER_REG, mask);
 }
@@ -495,22 +801,33 @@ static void xsdirx_globalintr(struct xsdirxss_core *core, bool flag)
 			     XSDIRX_GLBL_INTR_EN_MASK);
 }
 
-static void xsdirx_clearintr(struct xsdirxss_core *core, u32 mask)
+static inline void xsdirx_clearintr(struct xsdirxss_core *core, u32 mask)
 {
 	xsdirxss_set(core, XSDIRX_ISR_REG, mask);
 }
 
-static void xsdirx_vid_bridge_control(struct xsdirxss_core *core, bool enable)
+static void xsdirx_vid_bridge_control(struct xsdirxss_core *core,
+				      bool enable)
 {
+	struct xsdirxss_state *state =
+		container_of(core, struct xsdirxss_state, core);
+	u32 mask = XSDIRX_RST_CTRL_SDIRX_BRIDGE_ENB_MASK;
+
+	if (state->format.code == MEDIA_BUS_FMT_VUY10_1X30 ||
+	    state->format.code == MEDIA_BUS_FMT_RBG101010_1X30 ||
+	    state->format.code == MEDIA_BUS_FMT_RBG121212_1X36 ||
+	    state->format.code == MEDIA_BUS_FMT_VUY12_1X36)
+		mask |= (XSDIRX_RST_CTRL_BRIDGE_CH_FMT_YUV444 <<
+			 XSDIRX_RST_CTRL_BRIDGE_CH_FMT_OFFSET);
+
 	if (enable)
-		xsdirxss_set(core, XSDIRX_RST_CTRL_REG,
-			     XSDIRX_RST_CTRL_SDIRX_BRIDGE_ENB_MASK);
+		xsdirxss_set(core, XSDIRX_RST_CTRL_REG, mask);
 	else
-		xsdirxss_clr(core, XSDIRX_RST_CTRL_REG,
-			     XSDIRX_RST_CTRL_SDIRX_BRIDGE_ENB_MASK);
+		xsdirxss_clr(core, XSDIRX_RST_CTRL_REG, mask);
 }
 
-static void xsdirx_axis4_bridge_control(struct xsdirxss_core *core, bool enable)
+static void xsdirx_axis4_bridge_control(struct xsdirxss_core *core,
+					bool enable)
 {
 	if (enable)
 		xsdirxss_set(core, XSDIRX_RST_CTRL_REG,
@@ -530,11 +847,6 @@ static void xsdirx_streamflow_control(struct xsdirxss_core *core, bool enable)
 		xsdirx_vid_bridge_control(core, enable);
 		xsdirx_axis4_bridge_control(core, enable);
 	}
-}
-
-static void xsdirx_streamdowncb(struct xsdirxss_core *core)
-{
-	xsdirx_streamflow_control(core, false);
 }
 
 static void xsdirxss_get_framerate(struct v4l2_fract *frame_interval,
@@ -587,6 +899,57 @@ static void xsdirxss_get_framerate(struct v4l2_fract *frame_interval,
 	}
 }
 
+static void xsdirxss_set_gtclk(struct xsdirxss_state *state)
+{
+	struct clk *gtclk;
+	unsigned long clkrate;
+	int ret, is_frac;
+	struct xsdirxss_core *core = &state->core;
+	u32 mode;
+
+	mode = xsdirxss_read(core, XSDIRX_MODE_DET_STAT_REG);
+	mode &= XSDIRX_MODE_DET_STAT_RX_MODE_MASK;
+
+	/*
+	 * TODO: For now, don't change the clock rate for any mode except 12G.
+	 * In future, configure gt clock for all modes and enable clock only
+	 * when needed (stream on/off).
+	 */
+	if (mode != XSDIRX_MODE_12GI_MASK && mode != XSDIRX_MODE_12GF_MASK)
+		return;
+
+	xsdirx_core_disable(core);
+	xsdirx_globalintr(core, false);
+	xsdirx_disableintr(core, XSDIRX_INTR_ALL_MASK);
+
+	/* get sdi_rx_clk */
+	gtclk = core->clks[1].clk;
+	clkrate = clk_get_rate(gtclk);
+	is_frac = state->frame_interval.numerator == 1001 ? 1 : 0;
+
+	/* calcualte clkrate */
+	if (!is_frac)
+		clkrate = CLK_INT;
+	else
+		clkrate = (CLK_INT * 1000) / 1001;
+
+	ret = clk_set_rate(gtclk, clkrate);
+	if (ret)
+		dev_err(core->dev, "failed to set clk rate = %d\n", ret);
+
+	clkrate = clk_get_rate(gtclk);
+
+	dev_dbg(core->dev, "clkrate = %lu is_frac = %d\n",
+		clkrate, is_frac);
+
+	xsdirx_framer(core, state->framer_enable);
+	xsdirx_setedherrcnttrigger(core, state->edhmask);
+	xsdirx_setvidlockwindow(core, state->vidlockwin);
+	xsdirx_set_modedetect(core, state->searchmask);
+	xsdirx_enableintr(core, XSDIRX_INTR_ALL_MASK);
+	xsdirx_globalintr(core, true);
+	xsdirx_core_enable(core);
+}
 /**
  * xsdirx_get_stream_properties - Get SDI Rx stream properties
  * @state: pointer to driver state
@@ -603,14 +966,15 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 	u32 mode, payload = 0, val, family, valid, tscan;
 	u8 byte1 = 0, active_luma = 0, pic_type = 0, framerate = 0;
 	u8 sampling = XST352_BYTE3_COLOR_FORMAT_422;
-	struct v4l2_mbus_framefmt *format = &state->formats[0];
+	struct v4l2_mbus_framefmt *format = &state->format;
+	u32 bpc = XST352_BYTE4_BIT_DEPTH_10;
 
 	mode = xsdirxss_read(core, XSDIRX_MODE_DET_STAT_REG);
 	mode &= XSDIRX_MODE_DET_STAT_RX_MODE_MASK;
 
 	valid = xsdirxss_read(core, XSDIRX_ST352_VALID_REG);
 
-	if ((mode >= XSDIRX_MODE_3G_MASK) && !valid) {
+	if (mode >= XSDIRX_MODE_3G_MASK && !valid) {
 		dev_err(core->dev, "No valid ST352 payload present even for 3G mode and above\n");
 		return -EINVAL;
 	}
@@ -630,6 +994,8 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 				XST352_BYTE2_TS_TYPE_OFFSET;
 		sampling = (payload & XST352_BYTE3_COLOR_FORMAT_MASK) >>
 			   XST352_BYTE3_COLOR_FORMAT_OFFSET;
+		bpc = (payload & XST352_BYTE4_BIT_DEPTH_MASK) >>
+			XST352_BYTE4_BIT_DEPTH_OFFSET;
 	} else {
 		dev_dbg(core->dev, "No ST352 payload available : Mode = %d\n",
 			mode);
@@ -639,8 +1005,15 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 				XSDIRX_TS_DET_STAT_SCAN_OFFSET;
 	}
 
+	if ((bpc == XST352_BYTE4_BIT_DEPTH_10 && core->bpc != 10) ||
+	    (bpc == XST352_BYTE4_BIT_DEPTH_12 && core->bpc != 12)) {
+		dev_dbg(core->dev, "Bit depth not supported. bpc = %d core->bpc = %d\n",
+			bpc, core->bpc);
+		return -EINVAL;
+	}
+
 	family = (val & XSDIRX_TS_DET_STAT_FAMILY_MASK) >>
-		  XSDIRX_TS_DET_STAT_FAMILY_OFFSET;
+			XSDIRX_TS_DET_STAT_FAMILY_OFFSET;
 	state->ts_is_interlaced = tscan ? false : true;
 
 	dev_dbg(core->dev, "ts_is_interlaced = %d, family = %d\n",
@@ -781,6 +1154,13 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 			else
 				format->width = 3840;
 			break;
+		case XST352_BYTE1_ST2081_10_2_1080L_6G:
+			format->height = 1080;
+			if (active_luma)
+				format->width = 2048;
+			else
+				format->width = 1920;
+			break;
 		default:
 			dev_dbg(core->dev, "Unknown 6G Mode SMPTE standard\n");
 			return -EINVAL;
@@ -812,6 +1192,21 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 			format->field = V4L2_FIELD_NONE;
 		else
 			format->field = V4L2_FIELD_ALTERNATE;
+
+		if (format->height == 1080 && pic_type && !tscan)
+			format->field = V4L2_FIELD_ALTERNATE;
+
+		/*
+		 * In 3GB DL pSF mode the video is similar to interlaced.
+		 * So though it is a progressive video, its transport is
+		 * interlaced and is sent as two width x (height/2) buffers.
+		 */
+		if (byte1 == XST352_BYTE1_ST372_DL_3GB) {
+			if (state->ts_is_interlaced)
+				format->field = V4L2_FIELD_ALTERNATE;
+			else
+				format->field = V4L2_FIELD_NONE;
+		}
 	}
 
 	if (format->field == V4L2_FIELD_ALTERNATE)
@@ -819,10 +1214,28 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 
 	switch (sampling) {
 	case XST352_BYTE3_COLOR_FORMAT_420:
-		format->code = MEDIA_BUS_FMT_VYYUYY8_1X24;
+		if (core->bpc == 10)
+			format->code = MEDIA_BUS_FMT_VYYUYY10_4X20;
+		else
+			format->code = MEDIA_BUS_FMT_UYYVYY12_4X24;
 		break;
 	case XST352_BYTE3_COLOR_FORMAT_422:
-		format->code = MEDIA_BUS_FMT_UYVY8_1X16;
+		if (core->bpc == 10)
+			format->code = MEDIA_BUS_FMT_UYVY10_1X20;
+		else
+			format->code = MEDIA_BUS_FMT_UYVY12_1X24;
+		break;
+	case XST352_BYTE3_COLOR_FORMAT_YUV444:
+		if (core->bpc == 10)
+			format->code = MEDIA_BUS_FMT_VUY10_1X30;
+		else
+			format->code = MEDIA_BUS_FMT_VUY12_1X36;
+		break;
+	case XST352_BYTE3_COLOR_FORMAT_GBR:
+		if (core->bpc == 10)
+			format->code = MEDIA_BUS_FMT_RBG101010_1X30;
+		else
+			format->code = MEDIA_BUS_FMT_RBG121212_1X36;
 		break;
 	default:
 		dev_err(core->dev, "Unsupported color format : %d\n", sampling);
@@ -845,8 +1258,7 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
  * @irq: IRQ number
  * @dev_id: Pointer to device state
  *
- * The SDI Rx interrupts are cleared by first setting and then clearing the bits
- * in the interrupt clear register. The interrupt status register is read only.
+ * The SDI Rx interrupts are cleared by writing 1 to corresponding bit.
  *
  * Return: IRQ_HANDLED after handling interrupts
  */
@@ -862,11 +1274,16 @@ static irqreturn_t xsdirxss_irq_handler(int irq, void *dev_id)
 	if (!status)
 		return IRQ_NONE;
 
-	if (status & XSDIRX_INTR_VIDLOCK_MASK) {
+	xsdirxss_write(core, XSDIRX_ISR_REG, status);
+
+	if (status & XSDIRX_INTR_VIDLOCK_MASK ||
+	    status & XSDIRX_INTR_VIDUNLOCK_MASK) {
 		u32 val1, val2;
 
-		dev_dbg(core->dev, "video lock interrupt\n");
-		xsdirx_clearintr(core, XSDIRX_INTR_VIDLOCK_MASK);
+		dev_dbg(core->dev, "video lock/unlock interrupt\n");
+
+		xsdirx_streamflow_control(core, false);
+		state->streaming = false;
 
 		val1 = xsdirxss_read(core, XSDIRX_MODE_DET_STAT_REG);
 		val2 = xsdirxss_read(core, XSDIRX_TS_DET_STAT_REG);
@@ -876,7 +1293,7 @@ static irqreturn_t xsdirxss_irq_handler(int irq, void *dev_id)
 			u32 mask = XSDIRX_RST_CTRL_RST_CRC_ERRCNT_MASK |
 				   XSDIRX_RST_CTRL_RST_EDH_ERRCNT_MASK;
 
-			dev_dbg(core->dev, "mode & ts lock occurred\n");
+			dev_dbg(core->dev, "video lock interrupt\n");
 
 			xsdirxss_set(core, XSDIRX_RST_CTRL_REG, mask);
 			xsdirxss_clr(core, XSDIRX_RST_CTRL_REG, mask);
@@ -888,39 +1305,26 @@ static irqreturn_t xsdirxss_irq_handler(int irq, void *dev_id)
 			dev_dbg(core->dev, "st352 payload = 0x%08x\n", val2);
 
 			if (!xsdirx_get_stream_properties(state)) {
-				memset(&state->event, 0, sizeof(state->event));
-				state->event.type = V4L2_EVENT_SOURCE_CHANGE;
-				state->event.u.src_change.changes =
-					V4L2_EVENT_SRC_CH_RESOLUTION;
-				v4l2_subdev_notify_event(&state->subdev,
-							 &state->event);
-
 				state->vidlocked = true;
+				xsdirxss_set_gtclk(state);
 			} else {
 				dev_err(core->dev, "Unable to get stream properties!\n");
 				state->vidlocked = false;
 			}
 		} else {
-			dev_dbg(core->dev, "video unlock before video lock!\n");
+			dev_dbg(core->dev, "video unlock interrupt\n");
 			state->vidlocked = false;
 		}
-	}
-
-	if (status & XSDIRX_INTR_VIDUNLOCK_MASK) {
-		dev_dbg(core->dev, "video unlock interrupt\n");
-		xsdirx_clearintr(core, XSDIRX_INTR_VIDUNLOCK_MASK);
-		xsdirx_streamdowncb(core);
 
 		memset(&state->event, 0, sizeof(state->event));
-		state->event.type = V4L2_EVENT_XLNXSDIRX_VIDUNLOCK;
+		state->event.type = V4L2_EVENT_SOURCE_CHANGE;
+		state->event.u.src_change.changes =
+			V4L2_EVENT_SRC_CH_RESOLUTION;
 		v4l2_subdev_notify_event(&state->subdev, &state->event);
-
-		state->vidlocked = false;
 	}
 
 	if (status & XSDIRX_INTR_UNDERFLOW_MASK) {
 		dev_dbg(core->dev, "Video in to AXI4 Stream core underflow interrupt\n");
-		xsdirx_clearintr(core, XSDIRX_INTR_UNDERFLOW_MASK);
 
 		memset(&state->event, 0, sizeof(state->event));
 		state->event.type = V4L2_EVENT_XLNXSDIRX_UNDERFLOW;
@@ -929,7 +1333,6 @@ static irqreturn_t xsdirxss_irq_handler(int irq, void *dev_id)
 
 	if (status & XSDIRX_INTR_OVERFLOW_MASK) {
 		dev_dbg(core->dev, "Video in to AXI4 Stream core overflow interrupt\n");
-		xsdirx_clearintr(core, XSDIRX_INTR_OVERFLOW_MASK);
 
 		memset(&state->event, 0, sizeof(state->event));
 		state->event.type = V4L2_EVENT_XLNXSDIRX_OVERFLOW;
@@ -955,7 +1358,6 @@ static int xsdirxss_subscribe_event(struct v4l2_subdev *sd,
 	struct xsdirxss_core *core = &xsdirxss->core;
 
 	switch (sub->type) {
-	case V4L2_EVENT_XLNXSDIRX_VIDUNLOCK:
 	case V4L2_EVENT_XLNXSDIRX_UNDERFLOW:
 	case V4L2_EVENT_XLNXSDIRX_OVERFLOW:
 		ret = v4l2_event_subscribe(fh, sub, XSDIRX_MAX_EVENTS, NULL);
@@ -1018,12 +1420,15 @@ static int xsdirxss_s_ctrl(struct v4l2_ctrl *ctrl)
 	switch (ctrl->id) {
 	case V4L2_CID_XILINX_SDIRX_FRAMER:
 		xsdirx_framer(core, ctrl->val);
+		xsdirxss->framer_enable = ctrl->val;
 		break;
 	case V4L2_CID_XILINX_SDIRX_VIDLOCK_WINDOW:
 		xsdirx_setvidlockwindow(core, ctrl->val);
+		xsdirxss->vidlockwin = ctrl->val;
 		break;
 	case V4L2_CID_XILINX_SDIRX_EDH_ERRCNT_ENABLE:
 		xsdirx_setedherrcnttrigger(core, ctrl->val);
+		xsdirxss->edhmask = ctrl->val;
 		break;
 	case V4L2_CID_XILINX_SDIRX_SEARCH_MODES:
 		if (ctrl->val) {
@@ -1041,6 +1446,8 @@ static int xsdirxss_s_ctrl(struct v4l2_ctrl *ctrl)
 			}
 
 			ret = xsdirx_set_modedetect(core, ctrl->val);
+			if (!ret)
+				xsdirxss->searchmask = ctrl->val;
 		} else {
 			dev_err(core->dev, "Select at least one mode!\n");
 			return -EINVAL;
@@ -1170,26 +1577,18 @@ static int xsdirxss_log_status(struct v4l2_subdev *sd)
 {
 	struct xsdirxss_state *xsdirxss = to_xsdirxssstate(sd);
 	struct xsdirxss_core *core = &xsdirxss->core;
-	u32 data, i;
+	u32 i;
 
 	v4l2_info(sd, "***** SDI Rx subsystem reg dump start *****\n");
 	for (i = 0; i < 0x28; i++) {
+		u32 data;
+
 		data = xsdirxss_read(core, i * 4);
 		v4l2_info(sd, "offset 0x%08x data 0x%08x\n",
 			  i * 4, data);
 	}
 	v4l2_info(sd, "***** SDI Rx subsystem reg dump end *****\n");
 	return 0;
-}
-
-static void xsdirxss_start_stream(struct xsdirxss_state *xsdirxss)
-{
-	xsdirx_streamflow_control(&xsdirxss->core, true);
-}
-
-static void xsdirxss_stop_stream(struct xsdirxss_state *xsdirxss)
-{
-	xsdirx_streamflow_control(&xsdirxss->core, false);
 }
 
 /**
@@ -1248,16 +1647,16 @@ static int xsdirxss_s_stream(struct v4l2_subdev *sd, int enable)
 			return -EINVAL;
 		}
 
-		xsdirxss_start_stream(xsdirxss);
+		xsdirx_streamflow_control(core, true);
 		xsdirxss->streaming = true;
 		dev_dbg(core->dev, "Streaming started\n");
 	} else {
 		if (!xsdirxss->streaming) {
 			dev_dbg(core->dev, "Stopped streaming already\n");
-			return -EINVAL;
+			return 0;
 		}
 
-		xsdirxss_stop_stream(xsdirxss);
+		xsdirx_streamflow_control(core, false);
 		xsdirxss->streaming = false;
 		dev_dbg(core->dev, "Streaming stopped\n");
 	}
@@ -1265,16 +1664,40 @@ static int xsdirxss_s_stream(struct v4l2_subdev *sd, int enable)
 	return 0;
 }
 
+/**
+ * xsdirxss_g_input_status - It is used to determine if the video signal
+ * is present / locked onto or not.
+ *
+ * @sd: V4L2 Sub device
+ * @status: status of signal locked
+ *
+ * This is used to determine if the video signal is present and locked onto
+ * by the SDI Rx core or not based on vidlocked flag.
+ *
+ * Return: zero on success
+ */
+static int xsdirxss_g_input_status(struct v4l2_subdev *sd, u32 *status)
+{
+	struct xsdirxss_state *xsdirxss = to_xsdirxssstate(sd);
+
+	if (!xsdirxss->vidlocked)
+		*status = V4L2_IN_ST_NO_SYNC | V4L2_IN_ST_NO_SIGNAL;
+	else
+		*status = 0;
+
+	return 0;
+}
+
 static struct v4l2_mbus_framefmt *
 __xsdirxss_get_pad_format(struct xsdirxss_state *xsdirxss,
 			  struct v4l2_subdev_pad_config *cfg,
-				unsigned int pad, u32 which)
+			  unsigned int pad, u32 which)
 {
 	switch (which) {
 	case V4L2_SUBDEV_FORMAT_TRY:
 		return v4l2_subdev_get_try_format(&xsdirxss->subdev, cfg, pad);
 	case V4L2_SUBDEV_FORMAT_ACTIVE:
-		return &xsdirxss->formats[pad];
+		return &xsdirxss->format;
 	default:
 		return NULL;
 	}
@@ -1292,7 +1715,7 @@ __xsdirxss_get_pad_format(struct xsdirxss_state *xsdirxss,
  */
 static int xsdirxss_get_format(struct v4l2_subdev *sd,
 			       struct v4l2_subdev_pad_config *cfg,
-					struct v4l2_subdev_format *fmt)
+			       struct v4l2_subdev_format *fmt)
 {
 	struct xsdirxss_state *xsdirxss = to_xsdirxssstate(sd);
 	struct xsdirxss_core *core = &xsdirxss->core;
@@ -1325,7 +1748,7 @@ static int xsdirxss_get_format(struct v4l2_subdev *sd,
  */
 static int xsdirxss_set_format(struct v4l2_subdev *sd,
 			       struct v4l2_subdev_pad_config *cfg,
-				struct v4l2_subdev_format *fmt)
+			       struct v4l2_subdev_format *fmt)
 {
 	struct v4l2_mbus_framefmt *__format;
 	struct xsdirxss_state *xsdirxss = to_xsdirxssstate(sd);
@@ -1344,6 +1767,82 @@ static int xsdirxss_set_format(struct v4l2_subdev *sd,
 	fmt->format.code = __format->code;
 
 	return 0;
+}
+
+/**
+ * xsdirxss_enum_mbus_code - Handle pixel format enumeration
+ * @sd: pointer to v4l2 subdev structure
+ * @cfg: V4L2 subdev pad configuration
+ * @code: pointer to v4l2_subdev_mbus_code_enum structure
+ *
+ * Return: -EINVAL or zero on success
+ */
+static int xsdirxss_enum_mbus_code(struct v4l2_subdev *sd,
+				   struct v4l2_subdev_pad_config *cfg,
+				   struct v4l2_subdev_mbus_code_enum *code)
+{
+	struct xsdirxss_state *xsdirxss = to_xsdirxssstate(sd);
+	u32 index = code->index;
+
+	if (code->pad || index >= 4)
+		return -EINVAL;
+
+	if (xsdirxss->core.bpc == 12)
+		code->code = xsdirxss_12bpc_mbus_fmts[index];
+	else
+		code->code = xsdirxss_10bpc_mbus_fmts[index];
+
+	return 0;
+}
+
+/**
+ * xsdirxss_enum_dv_timings: Enumerate all the supported DV timings
+ * @sd: pointer to v4l2 subdev structure
+ * @timings: DV timings structure to be returned.
+ *
+ * Return: -EINVAL incase of invalid index and pad or zero on success
+ */
+static int xsdirxss_enum_dv_timings(struct v4l2_subdev *sd,
+				    struct v4l2_enum_dv_timings *timings)
+{
+	if (timings->index >= ARRAY_SIZE(fmt_cap))
+		return -EINVAL;
+
+	if (timings->pad != 0)
+		return -EINVAL;
+
+	timings->timings = fmt_cap[timings->index];
+	return 0;
+}
+
+/**
+ * xsdirxss_query_dv_timings: Query for the current DV timings
+ * @sd: pointer to v4l2 subdev structure
+ * @timings: DV timings structure to be returned.
+ *
+ * Return: -ENOLCK when video is not locked, -ERANGE when corresponding timing
+ * entry is not found or zero on success.
+ */
+static int xsdirxss_query_dv_timings(struct v4l2_subdev *sd,
+				     struct v4l2_dv_timings *timings)
+{
+	struct xsdirxss_state *state = to_xsdirxssstate(sd);
+	unsigned int i;
+
+	if (!state->vidlocked)
+		return -ENOLCK;
+
+	for (i = 0; i < ARRAY_SIZE(xsdirxss_dv_timings); i++) {
+		if (state->format.width == xsdirxss_dv_timings[i].width &&
+		    state->format.height == xsdirxss_dv_timings[i].height &&
+		    state->frame_interval.denominator ==
+		    (xsdirxss_dv_timings[i].fps * 1000)) {
+			*timings = xsdirxss_dv_timings[i].format;
+			return 0;
+		}
+	}
+
+	return -ERANGE;
 }
 
 /**
@@ -1395,7 +1894,7 @@ static const struct v4l2_ctrl_ops xsdirxss_ctrl_ops = {
 	.s_ctrl	= xsdirxss_s_ctrl
 };
 
-static struct v4l2_ctrl_config xsdirxss_edh_ctrls[] = {
+static const struct v4l2_ctrl_config xsdirxss_edh_ctrls[] = {
 	{
 		.ops	= &xsdirxss_ctrl_ops,
 		.id	= V4L2_CID_XILINX_SDIRX_EDH_ERRCNT_ENABLE,
@@ -1427,7 +1926,7 @@ static struct v4l2_ctrl_config xsdirxss_edh_ctrls[] = {
 	}
 };
 
-static struct v4l2_ctrl_config xsdirxss_ctrls[] = {
+static const struct v4l2_ctrl_config xsdirxss_ctrls[] = {
 	{
 		.ops	= &xsdirxss_ctrl_ops,
 		.id	= V4L2_CID_XILINX_SDIRX_FRAMER,
@@ -1512,17 +2011,21 @@ static const struct v4l2_subdev_core_ops xsdirxss_core_ops = {
 	.unsubscribe_event = xsdirxss_unsubscribe_event
 };
 
-static struct v4l2_subdev_video_ops xsdirxss_video_ops = {
+static const struct v4l2_subdev_video_ops xsdirxss_video_ops = {
 	.g_frame_interval = xsdirxss_g_frame_interval,
-	.s_stream = xsdirxss_s_stream
+	.s_stream = xsdirxss_s_stream,
+	.g_input_status = xsdirxss_g_input_status,
+	.query_dv_timings = xsdirxss_query_dv_timings,
 };
 
-static struct v4l2_subdev_pad_ops xsdirxss_pad_ops = {
+static const struct v4l2_subdev_pad_ops xsdirxss_pad_ops = {
 	.get_fmt = xsdirxss_get_format,
 	.set_fmt = xsdirxss_set_format,
+	.enum_mbus_code = xsdirxss_enum_mbus_code,
+	.enum_dv_timings = xsdirxss_enum_dv_timings,
 };
 
-static struct v4l2_subdev_ops xsdirxss_ops = {
+static const struct v4l2_subdev_ops xsdirxss_ops = {
 	.core = &xsdirxss_core_ops,
 	.video = &xsdirxss_video_ops,
 	.pad = &xsdirxss_pad_ops
@@ -1551,8 +2054,7 @@ static int xsdirxss_parse_of(struct xsdirxss_state *xsdirxss)
 	dev_dbg(core->dev, "EDH property = %s\n",
 		core->include_edh ? "Present" : "Absent");
 
-	ret = of_property_read_string(node, "xlnx,line-rate",
-				      &sdi_std);
+	ret = of_property_read_string(node, "xlnx,line-rate", &sdi_std);
 	if (ret < 0) {
 		dev_err(core->dev, "xlnx,line-rate property not found\n");
 		return ret;
@@ -1570,6 +2072,26 @@ static int xsdirxss_parse_of(struct xsdirxss_state *xsdirxss)
 	}
 	dev_dbg(core->dev, "SDI Rx Line Rate = %s, mode = %d\n", sdi_std,
 		core->mode);
+
+	ret = of_property_read_u32(node, "xlnx,bpp", &core->bpc);
+	if (ret < 0) {
+		if (ret != -EINVAL) {
+			dev_err(core->dev, "failed to get xlnx,bpp\n");
+			return ret;
+		}
+
+		/*
+		 * For backward compatibility, set default bpc as 10
+		 * in case xlnx,bpp is not present.
+		 */
+		core->bpc = 10;
+	}
+
+	if (core->bpc != 10 && core->bpc != 12) {
+		dev_err(core->dev, "bits per component=%u. Can be 10 or 12 only\n",
+			core->bpc);
+		return -EINVAL;
+	}
 
 	ports = of_get_child_by_name(node, "ports");
 	if (!ports)
@@ -1592,8 +2114,13 @@ static int xsdirxss_parse_of(struct xsdirxss_state *xsdirxss)
 			format->vf_code, format->width, format->bpp);
 
 		if (format->vf_code != XVIP_VF_YUV_422 &&
-		    format->vf_code != XVIP_VF_YUV_420) {
-			dev_err(core->dev, "Incorrect UG934 video format set.\n");
+		    format->vf_code != XVIP_VF_YUV_420 &&
+		    format->vf_code != XVIP_VF_YUV_444 &&
+		    format->vf_code != XVIP_VF_RBG &&
+		    (core->bpc == 10 && format->width != 10) &&
+		    (core->bpc == 12 && format->width != 12)) {
+			dev_err(core->dev,
+				"Incorrect UG934 video format set.\n");
 			return -EINVAL;
 		}
 		xsdirxss->vip_format = format;
@@ -1615,9 +2142,9 @@ static int xsdirxss_parse_of(struct xsdirxss_state *xsdirxss)
 
 	/* Register interrupt handler */
 	core->irq = irq_of_parse_and_map(node, 0);
-
-	ret = devm_request_irq(core->dev, core->irq, xsdirxss_irq_handler,
-			       IRQF_SHARED, "xilinx-sdirxss", xsdirxss);
+	ret = devm_request_threaded_irq(core->dev, core->irq, NULL,
+					xsdirxss_irq_handler, IRQF_ONESHOT,
+					"xilinx-sdirxss", xsdirxss);
 	if (ret) {
 		dev_err(core->dev, "Err = %d Interrupt handler reg failed!\n",
 			ret);
@@ -1643,44 +2170,31 @@ static int xsdirxss_probe(struct platform_device *pdev)
 	xsdirxss->core.dev = &pdev->dev;
 	core = &xsdirxss->core;
 
-	core->axi_clk = devm_clk_get(&pdev->dev, "s_axi_aclk");
-	if (IS_ERR(core->axi_clk)) {
-		ret = PTR_ERR(core->axi_clk);
-		dev_err(&pdev->dev, "failed to get s_axi_clk (%d)\n", ret);
+	core->rst_gt_gpio = devm_gpiod_get_optional(&pdev->dev, "reset_gt",
+						    GPIOD_OUT_HIGH);
+	if (IS_ERR(core->rst_gt_gpio)) {
+		ret = PTR_ERR(core->rst_gt_gpio);
+		if (ret != -EPROBE_DEFER)
+			dev_err(&pdev->dev, "Reset GT GPIO not setup in DT\n");
 		return ret;
 	}
 
-	core->sdirx_clk = devm_clk_get(&pdev->dev, "sdi_rx_clk");
-	if (IS_ERR(core->sdirx_clk)) {
-		ret = PTR_ERR(core->sdirx_clk);
-		dev_err(&pdev->dev, "failed to get sdi_rx_clk (%d)\n", ret);
+	core->num_clks = ARRAY_SIZE(xsdirxss_clks);
+	core->clks = devm_kcalloc(&pdev->dev, core->num_clks,
+				  sizeof(*core->clks), GFP_KERNEL);
+	if (!core->clks)
+		return -ENOMEM;
+
+	for (i = 0; i < core->num_clks; i++)
+		core->clks[i].id = xsdirxss_clks[i];
+
+	ret = devm_clk_bulk_get(&pdev->dev, core->num_clks, core->clks);
+	if (ret)
 		return ret;
-	}
 
-	core->vidout_clk = devm_clk_get(&pdev->dev, "video_out_clk");
-	if (IS_ERR(core->vidout_clk)) {
-		ret = PTR_ERR(core->vidout_clk);
-		dev_err(&pdev->dev, "failed to get video_out_aclk (%d)\n", ret);
+	ret = clk_bulk_prepare_enable(core->num_clks, core->clks);
+	if (ret)
 		return ret;
-	}
-
-	ret = clk_prepare_enable(core->axi_clk);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to enable axi_clk (%d)\n", ret);
-		return ret;
-	}
-
-	ret = clk_prepare_enable(core->sdirx_clk);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to enable sdirx_clk (%d)\n", ret);
-		goto rx_clk_err;
-	}
-
-	ret = clk_prepare_enable(core->vidout_clk);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to enable vidout_clk (%d)\n", ret);
-		goto vidout_clk_err;
-	}
 
 	ret = xsdirxss_parse_of(xsdirxss);
 	if (ret < 0)
@@ -1703,7 +2217,7 @@ static int xsdirxss_probe(struct platform_device *pdev)
 	xsdirxss_write(core, XSDIRX_CRC_ERRCNT_REG, 0xFFFF);
 
 	/* Initialize V4L2 subdevice and media entity */
-	xsdirxss->pads[0].flags = MEDIA_PAD_FL_SOURCE;
+	xsdirxss->pad.flags = MEDIA_PAD_FL_SOURCE;
 
 	/* Initialize the default format */
 	xsdirxss->default_format.code = xsdirxss->vip_format->code;
@@ -1712,7 +2226,7 @@ static int xsdirxss_probe(struct platform_device *pdev)
 	xsdirxss->default_format.width = XSDIRX_DEFAULT_WIDTH;
 	xsdirxss->default_format.height = XSDIRX_DEFAULT_HEIGHT;
 
-	xsdirxss->formats[0] = xsdirxss->default_format;
+	xsdirxss->format = xsdirxss->default_format;
 
 	/* Initialize V4L2 subdevice and media entity */
 	subdev = &xsdirxss->subdev;
@@ -1720,7 +2234,7 @@ static int xsdirxss_probe(struct platform_device *pdev)
 
 	subdev->dev = &pdev->dev;
 	subdev->internal_ops = &xsdirxss_internal_ops;
-	strlcpy(subdev->name, dev_name(&pdev->dev), sizeof(subdev->name));
+	strscpy(subdev->name, dev_name(&pdev->dev), sizeof(subdev->name));
 
 	subdev->flags |= V4L2_SUBDEV_FL_HAS_EVENTS | V4L2_SUBDEV_FL_HAS_DEVNODE;
 
@@ -1728,7 +2242,7 @@ static int xsdirxss_probe(struct platform_device *pdev)
 
 	v4l2_set_subdevdata(subdev, xsdirxss);
 
-	ret = media_entity_pads_init(&subdev->entity, 1, xsdirxss->pads);
+	ret = media_entity_pads_init(&subdev->entity, 1, &xsdirxss->pad);
 	if (ret < 0)
 		goto error;
 
@@ -1773,8 +2287,6 @@ static int xsdirxss_probe(struct platform_device *pdev)
 				goto error;
 			}
 		}
-	} else {
-		dev_dbg(xsdirxss->core.dev, "Not registering the EDH controls as EDH is disabled in IP\n");
 	}
 
 	if (xsdirxss->ctrl_handler.error) {
@@ -1801,35 +2313,39 @@ static int xsdirxss_probe(struct platform_device *pdev)
 
 	xsdirxss->streaming = false;
 
-	dev_info(xsdirxss->core.dev, "Xilinx SDI Rx Subsystem device found!\n");
-
 	xsdirx_core_enable(core);
+	xsdirxss_gt_reset(core);
+
+	dev_info(xsdirxss->core.dev, "Xilinx SDI Rx Subsystem device found!\n");
 
 	return 0;
 error:
 	v4l2_ctrl_handler_free(&xsdirxss->ctrl_handler);
 	media_entity_cleanup(&subdev->entity);
-
+	xsdirx_globalintr(core, false);
+	xsdirx_disableintr(core, XSDIRX_INTR_ALL_MASK);
 clk_err:
-	clk_disable_unprepare(core->vidout_clk);
-vidout_clk_err:
-	clk_disable_unprepare(core->sdirx_clk);
-rx_clk_err:
-	clk_disable_unprepare(core->axi_clk);
+	clk_bulk_disable_unprepare(core->num_clks, core->clks);
 	return ret;
 }
 
 static int xsdirxss_remove(struct platform_device *pdev)
 {
 	struct xsdirxss_state *xsdirxss = platform_get_drvdata(pdev);
+	struct xsdirxss_core *core = &xsdirxss->core;
 	struct v4l2_subdev *subdev = &xsdirxss->subdev;
 
 	v4l2_async_unregister_subdev(subdev);
 	v4l2_ctrl_handler_free(&xsdirxss->ctrl_handler);
 	media_entity_cleanup(&subdev->entity);
-	clk_disable_unprepare(xsdirxss->core.vidout_clk);
-	clk_disable_unprepare(xsdirxss->core.sdirx_clk);
-	clk_disable_unprepare(xsdirxss->core.axi_clk);
+
+	xsdirx_globalintr(core, false);
+	xsdirx_disableintr(core, XSDIRX_INTR_ALL_MASK);
+	xsdirx_core_disable(core);
+	xsdirx_streamflow_control(core, false);
+
+	clk_bulk_disable_unprepare(core->num_clks, core->clks);
+
 	return 0;
 }
 

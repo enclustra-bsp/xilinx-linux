@@ -1,19 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2016 Socionext Inc.
  *   Author: Masahiro Yamada <yamada.masahiro@socionext.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
-#include <linux/bitops.h>
+#include <linux/bitfield.h>
+#include <linux/bits.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/mmc/host.h>
@@ -27,15 +19,14 @@
 #define   SDHCI_CDNS_HRS04_ACK			BIT(26)
 #define   SDHCI_CDNS_HRS04_RD			BIT(25)
 #define   SDHCI_CDNS_HRS04_WR			BIT(24)
-#define   SDHCI_CDNS_HRS04_RDATA_SHIFT		16
-#define   SDHCI_CDNS_HRS04_WDATA_SHIFT		8
-#define   SDHCI_CDNS_HRS04_ADDR_SHIFT		0
+#define   SDHCI_CDNS_HRS04_RDATA		GENMASK(23, 16)
+#define   SDHCI_CDNS_HRS04_WDATA		GENMASK(15, 8)
+#define   SDHCI_CDNS_HRS04_ADDR			GENMASK(5, 0)
 
 #define SDHCI_CDNS_HRS06		0x18		/* eMMC control */
 #define   SDHCI_CDNS_HRS06_TUNE_UP		BIT(15)
-#define   SDHCI_CDNS_HRS06_TUNE_SHIFT		8
-#define   SDHCI_CDNS_HRS06_TUNE_MASK		0x3f
-#define   SDHCI_CDNS_HRS06_MODE_MASK		0x7
+#define   SDHCI_CDNS_HRS06_TUNE			GENMASK(13, 8)
+#define   SDHCI_CDNS_HRS06_MODE			GENMASK(2, 0)
 #define   SDHCI_CDNS_HRS06_MODE_SD		0x0
 #define   SDHCI_CDNS_HRS06_MODE_MMC_SDR		0x2
 #define   SDHCI_CDNS_HRS06_MODE_MMC_DDR		0x3
@@ -105,8 +96,8 @@ static int sdhci_cdns_write_phy_reg(struct sdhci_cdns_priv *priv,
 	u32 tmp;
 	int ret;
 
-	tmp = (data << SDHCI_CDNS_HRS04_WDATA_SHIFT) |
-	      (addr << SDHCI_CDNS_HRS04_ADDR_SHIFT);
+	tmp = FIELD_PREP(SDHCI_CDNS_HRS04_WDATA, data) |
+	      FIELD_PREP(SDHCI_CDNS_HRS04_ADDR, addr);
 	writel(tmp, reg);
 
 	tmp |= SDHCI_CDNS_HRS04_WR;
@@ -189,8 +180,8 @@ static void sdhci_cdns_set_emmc_mode(struct sdhci_cdns_priv *priv, u32 mode)
 
 	/* The speed mode for eMMC is selected by HRS06 register */
 	tmp = readl(priv->hrs_addr + SDHCI_CDNS_HRS06);
-	tmp &= ~SDHCI_CDNS_HRS06_MODE_MASK;
-	tmp |= mode;
+	tmp &= ~SDHCI_CDNS_HRS06_MODE;
+	tmp |= FIELD_PREP(SDHCI_CDNS_HRS06_MODE, mode);
 	writel(tmp, priv->hrs_addr + SDHCI_CDNS_HRS06);
 }
 
@@ -199,7 +190,7 @@ static u32 sdhci_cdns_get_emmc_mode(struct sdhci_cdns_priv *priv)
 	u32 tmp;
 
 	tmp = readl(priv->hrs_addr + SDHCI_CDNS_HRS06);
-	return tmp & SDHCI_CDNS_HRS06_MODE_MASK;
+	return FIELD_GET(SDHCI_CDNS_HRS06_MODE, tmp);
 }
 
 static void sdhci_cdns_set_uhs_signaling(struct sdhci_host *host,
@@ -253,18 +244,32 @@ static int sdhci_cdns_set_tune_val(struct sdhci_host *host, unsigned int val)
 	struct sdhci_cdns_priv *priv = sdhci_cdns_priv(host);
 	void __iomem *reg = priv->hrs_addr + SDHCI_CDNS_HRS06;
 	u32 tmp;
+	int i, ret;
 
-	if (WARN_ON(val > SDHCI_CDNS_HRS06_TUNE_MASK))
+	if (WARN_ON(!FIELD_FIT(SDHCI_CDNS_HRS06_TUNE, val)))
 		return -EINVAL;
 
 	tmp = readl(reg);
-	tmp &= ~(SDHCI_CDNS_HRS06_TUNE_MASK << SDHCI_CDNS_HRS06_TUNE_SHIFT);
-	tmp |= val << SDHCI_CDNS_HRS06_TUNE_SHIFT;
-	tmp |= SDHCI_CDNS_HRS06_TUNE_UP;
-	writel(tmp, reg);
+	tmp &= ~SDHCI_CDNS_HRS06_TUNE;
+	tmp |= FIELD_PREP(SDHCI_CDNS_HRS06_TUNE, val);
 
-	return readl_poll_timeout(reg, tmp, !(tmp & SDHCI_CDNS_HRS06_TUNE_UP),
-				  0, 1);
+	/*
+	 * Workaround for IP errata:
+	 * The IP6116 SD/eMMC PHY design has a timing issue on receive data
+	 * path. Send tune request twice.
+	 */
+	for (i = 0; i < 2; i++) {
+		tmp |= SDHCI_CDNS_HRS06_TUNE_UP;
+		writel(tmp, reg);
+
+		ret = readl_poll_timeout(reg, tmp,
+					 !(tmp & SDHCI_CDNS_HRS06_TUNE_UP),
+					 0, 1);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 static int sdhci_cdns_execute_tuning(struct mmc_host *mmc, u32 opcode)
@@ -332,10 +337,10 @@ static int sdhci_cdns_probe(struct platform_device *pdev)
 	struct sdhci_pltfm_host *pltfm_host;
 	struct sdhci_cdns_priv *priv;
 	struct clk *clk;
-	size_t priv_size;
 	unsigned int nr_phy_params;
 	int ret;
 	struct device *dev = &pdev->dev;
+	static const u16 version = SDHCI_SPEC_400 << SDHCI_SPEC_VER_SHIFT;
 
 	clk = devm_clk_get(dev, NULL);
 	if (IS_ERR(clk))
@@ -346,8 +351,8 @@ static int sdhci_cdns_probe(struct platform_device *pdev)
 		return ret;
 
 	nr_phy_params = sdhci_cdns_phy_param_count(dev->of_node);
-	priv_size = sizeof(*priv) + sizeof(priv->phy_params[0]) * nr_phy_params;
-	host = sdhci_pltfm_init(pdev, &sdhci_cdns_pltfm_data, priv_size);
+	host = sdhci_pltfm_init(pdev, &sdhci_cdns_pltfm_data,
+				struct_size(priv, phy_params, nr_phy_params));
 	if (IS_ERR(host)) {
 		ret = PTR_ERR(host);
 		goto disable_clk;
@@ -364,6 +369,8 @@ static int sdhci_cdns_probe(struct platform_device *pdev)
 	host->mmc_host_ops.execute_tuning = sdhci_cdns_execute_tuning;
 	host->mmc_host_ops.hs400_enhanced_strobe =
 				sdhci_cdns_hs400_enhanced_strobe;
+	sdhci_enable_v4_mode(host);
+	__sdhci_read_caps(host, &version, NULL, NULL);
 
 	sdhci_get_of_property(pdev);
 

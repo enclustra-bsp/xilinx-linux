@@ -30,7 +30,7 @@
 
 #include <linux/firmware.h>
 #include <linux/module.h>
-#include <drm/drmP.h>
+
 #include <drm/drm.h>
 
 #include "radeon.h"
@@ -477,7 +477,7 @@ static int radeon_uvd_cs_msg(struct radeon_cs_parser *p, struct radeon_bo *bo,
 		return -EINVAL;
 	}
 
-	f = reservation_object_get_excl(bo->tbo.resv);
+	f = dma_resv_get_excl(bo->tbo.base.resv);
 	if (f) {
 		r = radeon_fence_wait((struct radeon_fence *)f, false);
 		if (r) {
@@ -995,7 +995,7 @@ int radeon_uvd_calc_upll_dividers(struct radeon_device *rdev,
 		/* calc dclk divider with current vco freq */
 		dclk_div = radeon_uvd_calc_upll_post_div(vco_freq, dclk,
 							 pd_min, pd_even);
-		if (vclk_div > pd_max)
+		if (dclk_div > pd_max)
 			break; /* vco is too big, it has to stop */
 
 		/* calc score with current vco freq */

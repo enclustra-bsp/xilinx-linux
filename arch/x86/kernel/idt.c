@@ -1,13 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Interrupt descriptor table related code
- *
- * This file is licensed under the GPL V2
  */
 #include <linux/interrupt.h>
 
 #include <asm/traps.h>
 #include <asm/proto.h>
 #include <asm/desc.h>
+#include <asm/hw_irq.h>
 
 struct idt_data {
 	unsigned int	vector;
@@ -40,13 +40,12 @@ struct idt_data {
 #define SYSG(_vector, _addr)				\
 	G(_vector, _addr, DEFAULT_STACK, GATE_INTERRUPT, DPL3, __KERNEL_CS)
 
-/* Interrupt gate with interrupt stack */
+/*
+ * Interrupt gate with interrupt stack. The _ist index is the index in
+ * the tss.ist[] array, but for the descriptor it needs to start at 1.
+ */
 #define ISTG(_vector, _addr, _ist)			\
-	G(_vector, _addr, _ist, GATE_INTERRUPT, DPL0, __KERNEL_CS)
-
-/* System interrupt gate with interrupt stack */
-#define SISTG(_vector, _addr, _ist)			\
-	G(_vector, _addr, _ist, GATE_INTERRUPT, DPL3, __KERNEL_CS)
+	G(_vector, _addr, _ist + 1, GATE_INTERRUPT, DPL0, __KERNEL_CS)
 
 /* Task gate */
 #define TSKG(_vector, _gdt)				\
@@ -56,7 +55,7 @@ struct idt_data {
  * Early traps running on the DEFAULT_STACK because the other interrupt
  * stacks work only after cpu_init().
  */
-static const __initdata struct idt_data early_idts[] = {
+static const __initconst struct idt_data early_idts[] = {
 	INTG(X86_TRAP_DB,		debug),
 	SYSG(X86_TRAP_BP,		int3),
 #ifdef CONFIG_X86_32
@@ -70,7 +69,7 @@ static const __initdata struct idt_data early_idts[] = {
  * the traps which use them are reinitialized with IST after cpu_init() has
  * set up TSS.
  */
-static const __initdata struct idt_data def_idts[] = {
+static const __initconst struct idt_data def_idts[] = {
 	INTG(X86_TRAP_DE,		divide_error),
 	INTG(X86_TRAP_NMI,		nmi),
 	INTG(X86_TRAP_BR,		bounds),
@@ -108,7 +107,7 @@ static const __initdata struct idt_data def_idts[] = {
 /*
  * The APIC and SMP idt entries
  */
-static const __initdata struct idt_data apic_idts[] = {
+static const __initconst struct idt_data apic_idts[] = {
 #ifdef CONFIG_SMP
 	INTG(RESCHEDULE_VECTOR,		reschedule_interrupt),
 	INTG(CALL_FUNCTION_VECTOR,	call_function_interrupt),
@@ -140,6 +139,9 @@ static const __initdata struct idt_data apic_idts[] = {
 # ifdef CONFIG_IRQ_WORK
 	INTG(IRQ_WORK_VECTOR,		irq_work_interrupt),
 # endif
+#ifdef CONFIG_X86_UV
+	INTG(UV_BAU_MESSAGE,		uv_bau_message_intr1),
+#endif
 	INTG(SPURIOUS_APIC_VECTOR,	spurious_interrupt),
 	INTG(ERROR_APIC_VECTOR,		error_interrupt),
 #endif
@@ -150,7 +152,7 @@ static const __initdata struct idt_data apic_idts[] = {
  * Early traps running on the DEFAULT_STACK because the other interrupt
  * stacks work only after cpu_init().
  */
-static const __initdata struct idt_data early_pf_idts[] = {
+static const __initconst struct idt_data early_pf_idts[] = {
 	INTG(X86_TRAP_PF,		page_fault),
 };
 
@@ -158,9 +160,8 @@ static const __initdata struct idt_data early_pf_idts[] = {
  * Override for the debug_idt. Same as the default, but with interrupt
  * stack set to DEFAULT_STACK (0). Required for NMI trap handling.
  */
-static const __initdata struct idt_data dbg_idts[] = {
+static const __initconst struct idt_data dbg_idts[] = {
 	INTG(X86_TRAP_DB,	debug),
-	INTG(X86_TRAP_BP,	int3),
 };
 #endif
 
@@ -180,13 +181,12 @@ gate_desc debug_idt_table[IDT_ENTRIES] __page_aligned_bss;
  * The exceptions which use Interrupt stacks. They are setup after
  * cpu_init() when the TSS has been initialized.
  */
-static const __initdata struct idt_data ist_idts[] = {
-	ISTG(X86_TRAP_DB,	debug,		DEBUG_STACK),
-	ISTG(X86_TRAP_NMI,	nmi,		NMI_STACK),
-	SISTG(X86_TRAP_BP,	int3,		DEBUG_STACK),
-	ISTG(X86_TRAP_DF,	double_fault,	DOUBLEFAULT_STACK),
+static const __initconst struct idt_data ist_idts[] = {
+	ISTG(X86_TRAP_DB,	debug,		IST_INDEX_DB),
+	ISTG(X86_TRAP_NMI,	nmi,		IST_INDEX_NMI),
+	ISTG(X86_TRAP_DF,	double_fault,	IST_INDEX_DF),
 #ifdef CONFIG_X86_MCE
-	ISTG(X86_TRAP_MC,	&machine_check,	MCE_STACK),
+	ISTG(X86_TRAP_MC,	&machine_check,	IST_INDEX_MCE),
 #endif
 };
 
@@ -223,7 +223,7 @@ idt_setup_from_table(gate_desc *idt, const struct idt_data *t, int size, bool sy
 		idt_init_desc(&desc, t);
 		write_idt_entry(idt, t->vector, &desc);
 		if (sys)
-			set_bit(t->vector, used_vectors);
+			set_bit(t->vector, system_vectors);
 	}
 }
 
@@ -311,20 +311,18 @@ void __init idt_setup_apic_and_irq_gates(void)
 
 	idt_setup_from_table(idt_table, apic_idts, ARRAY_SIZE(apic_idts), true);
 
-	for_each_clear_bit_from(i, used_vectors, FIRST_SYSTEM_VECTOR) {
+	for_each_clear_bit_from(i, system_vectors, FIRST_SYSTEM_VECTOR) {
 		entry = irq_entries_start + 8 * (i - FIRST_EXTERNAL_VECTOR);
 		set_intr_gate(i, entry);
 	}
 
-	for_each_clear_bit_from(i, used_vectors, NR_VECTORS) {
 #ifdef CONFIG_X86_LOCAL_APIC
-		set_bit(i, used_vectors);
-		set_intr_gate(i, spurious_interrupt);
-#else
-		entry = irq_entries_start + 8 * (i - FIRST_EXTERNAL_VECTOR);
+	for_each_clear_bit_from(i, system_vectors, NR_VECTORS) {
+		set_bit(i, system_vectors);
+		entry = spurious_entries_start + 8 * (i - FIRST_SYSTEM_VECTOR);
 		set_intr_gate(i, entry);
-#endif
 	}
+#endif
 }
 
 /**
@@ -356,7 +354,7 @@ void idt_invalidate(void *addr)
 
 void __init update_intr_gate(unsigned int n, const void *addr)
 {
-	if (WARN_ON_ONCE(!test_bit(n, used_vectors)))
+	if (WARN_ON_ONCE(!test_bit(n, system_vectors)))
 		return;
 	set_intr_gate(n, addr);
 }
@@ -364,6 +362,6 @@ void __init update_intr_gate(unsigned int n, const void *addr)
 void alloc_intr_gate(unsigned int n, const void *addr)
 {
 	BUG_ON(n < FIRST_SYSTEM_VECTOR);
-	if (!test_and_set_bit(n, used_vectors))
+	if (!test_and_set_bit(n, system_vectors))
 		set_intr_gate(n, addr);
 }

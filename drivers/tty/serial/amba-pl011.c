@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  *  Driver for AMBA serial ports
  *
@@ -6,20 +7,6 @@
  *  Copyright 1999 ARM Limited
  *  Copyright (C) 2000 Deep Blue Solutions Ltd.
  *  Copyright (C) 2010 ST-Ericsson SA
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * This is a generic driver for ARM AMBA-type serial ports.  They
  * have a lot of 16550-like features, but are not register compatible.
@@ -281,7 +268,6 @@ struct uart_amba_port {
 	unsigned int		old_status;
 	unsigned int		fifosize;	/* vendor-specific */
 	unsigned int		old_cr;		/* state during shutdown */
-	bool			autorts;
 	unsigned int		fixed_baud;	/* vendor-set fixed baud rate */
 	char			type[12];
 #ifdef CONFIG_DMA_ENGINE
@@ -328,10 +314,9 @@ static void pl011_write(unsigned int val, const struct uart_amba_port *uap,
 static int pl011_fifo_to_tty(struct uart_amba_port *uap)
 {
 	u16 status;
-	unsigned int ch, flag, max_count = 256;
-	int fifotaken = 0;
+	unsigned int ch, flag, fifotaken;
 
-	while (max_count--) {
+	for (fifotaken = 0; fifotaken != 256; fifotaken++) {
 		status = pl011_read(uap, REG_FR);
 		if (status & UART01x_FR_RXFE)
 			break;
@@ -340,7 +325,6 @@ static int pl011_fifo_to_tty(struct uart_amba_port *uap)
 		ch = pl011_read(uap, REG_DR) | UART_DUMMY_DR_RX;
 		flag = TTY_NORMAL;
 		uap->port.icount.rx++;
-		fifotaken++;
 
 		if (unlikely(ch & UART_DR_ERROR)) {
 			if (ch & UART011_DR_BE) {
@@ -1078,9 +1062,9 @@ static inline void pl011_dma_rx_stop(struct uart_amba_port *uap)
  * Every polling, It checks the residue in the dma buffer and transfer
  * data to the tty. Also, last_residue is updated for the next polling.
  */
-static void pl011_dma_rx_poll(unsigned long args)
+static void pl011_dma_rx_poll(struct timer_list *t)
 {
-	struct uart_amba_port *uap = (struct uart_amba_port *)args;
+	struct uart_amba_port *uap = from_timer(uap, t, dmarx.timer);
 	struct tty_port *port = &uap->port.state->port;
 	struct pl011_dmarx_data *dmarx = &uap->dmarx;
 	struct dma_chan *rxchan = uap->dmarx.chan;
@@ -1192,9 +1176,7 @@ skip_rx:
 			dev_dbg(uap->port.dev, "could not trigger initial "
 				"RX DMA job, fall back to interrupt mode\n");
 		if (uap->dmarx.poll_rate) {
-			init_timer(&(uap->dmarx.timer));
-			uap->dmarx.timer.function = pl011_dma_rx_poll;
-			uap->dmarx.timer.data = (unsigned long)uap;
+			timer_setup(&uap->dmarx.timer, pl011_dma_rx_poll, 0);
 			mod_timer(&uap->dmarx.timer,
 				jiffies +
 				msecs_to_jiffies(uap->dmarx.poll_rate));
@@ -1498,12 +1480,10 @@ static irqreturn_t pl011_int(int irq, void *dev_id)
 	struct uart_amba_port *uap = dev_id;
 	unsigned long flags;
 	unsigned int status, pass_counter = AMBA_ISR_PASS_LIMIT;
-	u16 imsc;
 	int handled = 0;
 
 	spin_lock_irqsave(&uap->port.lock, flags);
-	imsc = pl011_read(uap, REG_IMSC);
-	status = pl011_read(uap, REG_RIS) & imsc;
+	status = pl011_read(uap, REG_RIS) & uap->im;
 	if (status) {
 		do {
 			check_apply_cts_event_workaround(uap);
@@ -1527,7 +1507,7 @@ static irqreturn_t pl011_int(int irq, void *dev_id)
 			if (pass_counter-- == 0)
 				break;
 
-			status = pl011_read(uap, REG_RIS) & imsc;
+			status = pl011_read(uap, REG_RIS) & uap->im;
 		} while (status != 0);
 		handled = 1;
 	}
@@ -1588,7 +1568,7 @@ static void pl011_set_mctrl(struct uart_port *port, unsigned int mctrl)
 	TIOCMBIT(TIOCM_OUT2, UART011_CR_OUT2);
 	TIOCMBIT(TIOCM_LOOP, UART011_CR_LBE);
 
-	if (uap->autorts) {
+	if (port->status & UPSTAT_AUTORTS) {
 		/* We need to disable auto-RTS if we want to turn RTS off */
 		TIOCMBIT(TIOCM_RTS, UART011_CR_RTSEN);
 	}
@@ -1737,7 +1717,7 @@ static int pl011_allocate_irq(struct uart_amba_port *uap)
 {
 	pl011_write(uap->im, uap, REG_IMSC);
 
-	return request_irq(uap->port.irq, pl011_int, 0, "uart-pl011", uap);
+	return request_irq(uap->port.irq, pl011_int, IRQF_SHARED, "uart-pl011", uap);
 }
 
 /*
@@ -1747,10 +1727,26 @@ static int pl011_allocate_irq(struct uart_amba_port *uap)
  */
 static void pl011_enable_interrupts(struct uart_amba_port *uap)
 {
+	unsigned int i;
+
 	spin_lock_irq(&uap->port.lock);
 
 	/* Clear out any spuriously appearing RX interrupts */
 	pl011_write(UART011_RTIS | UART011_RXIS, uap, REG_ICR);
+
+	/*
+	 * RXIS is asserted only when the RX FIFO transitions from below
+	 * to above the trigger threshold.  If the RX FIFO is already
+	 * full to the threshold this can't happen and RXIS will now be
+	 * stuck off.  Drain the RX FIFO explicitly to fix this:
+	 */
+	for (i = 0; i < uap->fifosize * 2; ++i) {
+		if (pl011_read(uap, REG_FR) & UART01x_FR_RXFE)
+			break;
+
+		pl011_read(uap, REG_DR);
+	}
+
 	uap->im = UART011_RTIM;
 	if (!pl011_dma_rx_running(uap))
 		uap->im |= UART011_RXIM;
@@ -1842,7 +1838,7 @@ static void pl011_disable_uart(struct uart_amba_port *uap)
 {
 	unsigned int cr;
 
-	uap->autorts = false;
+	uap->port.status &= ~(UPSTAT_AUTOCTS | UPSTAT_AUTORTS);
 	spin_lock_irq(&uap->port.lock);
 	cr = pl011_read(uap, REG_CR);
 	uap->old_cr = cr;
@@ -2028,10 +2024,10 @@ pl011_set_termios(struct uart_port *port, struct ktermios *termios,
 			old_cr |= UART011_CR_RTSEN;
 
 		old_cr |= UART011_CR_CTSEN;
-		uap->autorts = true;
+		port->status |= UPSTAT_AUTOCTS | UPSTAT_AUTORTS;
 	} else {
 		old_cr &= ~(UART011_CR_CTSEN | UART011_CR_RTSEN);
-		uap->autorts = false;
+		port->status &= ~(UPSTAT_AUTOCTS | UPSTAT_AUTORTS);
 	}
 
 	if (uap->vendor->oversampling) {
@@ -2076,17 +2072,45 @@ sbsa_uart_set_termios(struct uart_port *port, struct ktermios *termios,
 	struct uart_amba_port *uap =
 	    container_of(port, struct uart_amba_port, port);
 	unsigned long flags;
+	unsigned int lcr_h, old_cr;
 
 	tty_termios_encode_baud_rate(termios, uap->fixed_baud, uap->fixed_baud);
-
 	/* The SBSA UART only supports 8n1 without hardware flow control. */
-	termios->c_cflag &= ~(CSIZE | CSTOPB | PARENB | PARODD);
 	termios->c_cflag &= ~(CMSPAR | CRTSCTS);
-	termios->c_cflag |= CS8 | CLOCAL;
+	switch (termios->c_cflag & CSIZE) {
+	case CS5:
+		lcr_h = UART01x_LCRH_WLEN_5;
+		break;
+	case CS6:
+		lcr_h = UART01x_LCRH_WLEN_6;
+		break;
+	case CS7:
+		lcr_h = UART01x_LCRH_WLEN_7;
+		break;
+	default:
+		lcr_h = UART01x_LCRH_WLEN_8;
+		break;
+	}
+	if (termios->c_cflag & CSTOPB)
+		lcr_h |= UART01x_LCRH_STP2;
+	if (termios->c_cflag & PARENB) {
+		lcr_h |= UART01x_LCRH_PEN;
+		if (!(termios->c_cflag & PARODD))
+			lcr_h |= UART01x_LCRH_EPS;
+		if (termios->c_cflag & CMSPAR)
+			lcr_h |= UART011_LCRH_SPS;
+	}
+	if (uap->fifosize > 1)
+		lcr_h |= UART01x_LCRH_FEN;
 
 	spin_lock_irqsave(&port->lock, flags);
 	uart_update_timeout(port, CS8, uap->fixed_baud);
 	pl011_setup_status_masks(port, termios);
+	/* first, disable everything */
+	old_cr = pl011_read(uap, REG_CR);
+	pl011_write(0, uap, REG_CR);
+	pl011_write_lcr_h(uap, lcr_h);
+	pl011_write(old_cr, uap, REG_CR);
 	spin_unlock_irqrestore(&port->lock, flags);
 }
 
@@ -2722,11 +2746,8 @@ static int sbsa_uart_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ret = platform_get_irq(pdev, 0);
-	if (ret < 0) {
-		if (ret != -EPROBE_DEFER)
-			dev_err(&pdev->dev, "cannot obtain irq\n");
+	if (ret < 0)
 		return ret;
-	}
 	uap->port.irq	= ret;
 
 #ifdef CONFIG_ACPI_SPCR_TABLE
@@ -2782,8 +2803,10 @@ static struct platform_driver arm_sbsa_uart_platform_driver = {
 	.remove		= sbsa_uart_remove,
 	.driver	= {
 		.name	= "sbsa-uart",
+		.pm	= &pl011_dev_pm_ops,
 		.of_match_table = of_match_ptr(sbsa_uart_of_match),
 		.acpi_match_table = ACPI_PTR(sbsa_uart_acpi_match),
+		.suppress_bind_attrs = IS_BUILTIN(CONFIG_SERIAL_AMBA_PL011),
 	},
 };
 
@@ -2812,6 +2835,7 @@ static struct amba_driver pl011_driver = {
 	.drv = {
 		.name	= "uart-pl011",
 		.pm	= &pl011_dev_pm_ops,
+		.suppress_bind_attrs = IS_BUILTIN(CONFIG_SERIAL_AMBA_PL011),
 	},
 	.id_table	= pl011_ids,
 	.probe		= pl011_probe,

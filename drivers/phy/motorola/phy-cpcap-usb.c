@@ -231,8 +231,9 @@ static void cpcap_usb_detect(struct work_struct *work)
 			goto out_err;
 
 		error = regmap_update_bits(ddata->reg, CPCAP_REG_USBC3,
-					   CPCAP_BIT_VBUSSTBY_EN,
-					   CPCAP_BIT_VBUSSTBY_EN);
+					   CPCAP_BIT_VBUSSTBY_EN |
+					   CPCAP_BIT_VBUSEN_SPI,
+					   CPCAP_BIT_VBUSEN_SPI);
 		if (error)
 			goto out_err;
 
@@ -240,7 +241,8 @@ static void cpcap_usb_detect(struct work_struct *work)
 	}
 
 	error = regmap_update_bits(ddata->reg, CPCAP_REG_USBC3,
-				   CPCAP_BIT_VBUSSTBY_EN, 0);
+				   CPCAP_BIT_VBUSSTBY_EN |
+				   CPCAP_BIT_VBUSEN_SPI, 0);
 	if (error)
 		goto out_err;
 
@@ -310,7 +312,7 @@ static int cpcap_usb_init_irq(struct platform_device *pdev,
 	int irq, error;
 
 	irq = platform_get_irq_byname(pdev, name);
-	if (!irq)
+	if (irq < 0)
 		return -ENODEV;
 
 	error = devm_request_threaded_irq(ddata->dev, irq, NULL,

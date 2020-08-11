@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2014-2015 Pengutronix, Markus Pargmann <mpa@pengutronix.de>
- *
- * This program is free software; you can redistribute it and/or modify it under
- * the terms of the GNU General Public License version 2 as published by the
- * Free Software Foundation.
  */
 
 #include <linux/clk.h>
@@ -72,10 +69,8 @@ static int mx25_tsadc_setup_irq(struct platform_device *pdev,
 	int irq;
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq <= 0) {
-		dev_err(dev, "Failed to get irq\n");
+	if (irq <= 0)
 		return irq;
-	}
 
 	tsadc->domain = irq_domain_add_simple(np, 2, 0, &mx25_tsadc_domain_ops,
 					      tsadc);
@@ -84,8 +79,7 @@ static int mx25_tsadc_setup_irq(struct platform_device *pdev,
 		return -ENOMEM;
 	}
 
-	irq_set_chained_handler(irq, mx25_tsadc_irq_handler);
-	irq_set_handler_data(irq, tsadc);
+	irq_set_chained_handler_and_data(irq, mx25_tsadc_irq_handler, tsadc);
 
 	return 0;
 }
@@ -180,6 +174,19 @@ static int mx25_tsadc_probe(struct platform_device *pdev)
 	return devm_of_platform_populate(dev);
 }
 
+static int mx25_tsadc_remove(struct platform_device *pdev)
+{
+	struct mx25_tsadc *tsadc = platform_get_drvdata(pdev);
+	int irq = platform_get_irq(pdev, 0);
+
+	if (irq) {
+		irq_set_chained_handler_and_data(irq, NULL, NULL);
+		irq_domain_remove(tsadc->domain);
+	}
+
+	return 0;
+}
+
 static const struct of_device_id mx25_tsadc_ids[] = {
 	{ .compatible = "fsl,imx25-tsadc" },
 	{ /* Sentinel */ }
@@ -192,6 +199,7 @@ static struct platform_driver mx25_tsadc_driver = {
 		.of_match_table = of_match_ptr(mx25_tsadc_ids),
 	},
 	.probe = mx25_tsadc_probe,
+	.remove = mx25_tsadc_remove,
 };
 module_platform_driver(mx25_tsadc_driver);
 

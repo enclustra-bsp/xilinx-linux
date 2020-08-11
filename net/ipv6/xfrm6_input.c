@@ -32,6 +32,14 @@ int xfrm6_rcv_spi(struct sk_buff *skb, int nexthdr, __be32 spi,
 }
 EXPORT_SYMBOL(xfrm6_rcv_spi);
 
+static int xfrm6_transport_finish2(struct net *net, struct sock *sk,
+				   struct sk_buff *skb)
+{
+	if (xfrm_trans_queue(skb, ip6_rcv_finish))
+		__kfree_skb(skb);
+	return -1;
+}
+
 int xfrm6_transport_finish(struct sk_buff *skb, int async)
 {
 	struct xfrm_offload *xo = xfrm_offload(skb);
@@ -51,12 +59,13 @@ int xfrm6_transport_finish(struct sk_buff *skb, int async)
 
 	if (xo && (xo->flags & XFRM_GRO)) {
 		skb_mac_header_rebuild(skb);
+		skb_reset_transport_header(skb);
 		return -1;
 	}
 
 	NF_HOOK(NFPROTO_IPV6, NF_INET_PRE_ROUTING,
 		dev_net(skb->dev), NULL, skb, skb->dev, NULL,
-		ip6_rcv_finish);
+		xfrm6_transport_finish2);
 	return -1;
 }
 
@@ -77,14 +86,16 @@ int xfrm6_input_addr(struct sk_buff *skb, xfrm_address_t *daddr,
 {
 	struct net *net = dev_net(skb->dev);
 	struct xfrm_state *x = NULL;
+	struct sec_path *sp;
 	int i = 0;
 
-	if (secpath_set(skb)) {
+	sp = secpath_set(skb);
+	if (!sp) {
 		XFRM_INC_STATS(net, LINUX_MIB_XFRMINERROR);
 		goto drop;
 	}
 
-	if (1 + skb->sp->len == XFRM_MAX_DEPTH) {
+	if (1 + sp->len == XFRM_MAX_DEPTH) {
 		XFRM_INC_STATS(net, LINUX_MIB_XFRMINBUFFERERROR);
 		goto drop;
 	}
@@ -136,7 +147,7 @@ int xfrm6_input_addr(struct sk_buff *skb, xfrm_address_t *daddr,
 		goto drop;
 	}
 
-	skb->sp->xvec[skb->sp->len++] = x;
+	sp->xvec[sp->len++] = x;
 
 	spin_lock(&x->lock);
 

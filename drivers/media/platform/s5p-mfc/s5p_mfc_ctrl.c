@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * linux/drivers/media/platform/s5p-mfc/s5p_mfc_ctrl.c
  *
  * Copyright (c) 2010 Samsung Electronics Co., Ltd.
  *		http://www.samsung.com/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/delay.h>
@@ -51,15 +47,18 @@ int s5p_mfc_load_firmware(struct s5p_mfc_dev *dev)
 	struct firmware *fw_blob;
 	int i, err = -EINVAL;
 
-	/* Firmare has to be present as a separate file or compiled
+	/* Firmware has to be present as a separate file or compiled
 	 * into kernel. */
 	mfc_debug_enter();
+
+	if (dev->fw_get_done)
+		return 0;
 
 	for (i = MFC_FW_MAX_VERSIONS - 1; i >= 0; i--) {
 		if (!dev->variant->fw_name[i])
 			continue;
 		err = request_firmware((const struct firmware **)&fw_blob,
-				dev->variant->fw_name[i], dev->v4l2_dev.dev);
+				dev->variant->fw_name[i], &dev->plat_dev->dev);
 		if (!err) {
 			dev->fw_ver = (enum s5p_mfc_fw_ver) i;
 			break;
@@ -75,13 +74,9 @@ int s5p_mfc_load_firmware(struct s5p_mfc_dev *dev)
 		release_firmware(fw_blob);
 		return -ENOMEM;
 	}
-	if (!dev->fw_buf.virt) {
-		mfc_err("MFC firmware is not allocated\n");
-		release_firmware(fw_blob);
-		return -EINVAL;
-	}
 	memcpy(dev->fw_buf.virt, fw_blob->data, fw_blob->size);
 	wmb();
+	dev->fw_get_done = true;
 	release_firmware(fw_blob);
 	mfc_debug_leave();
 	return 0;
@@ -93,6 +88,7 @@ int s5p_mfc_release_firmware(struct s5p_mfc_dev *dev)
 	/* Before calling this function one has to make sure
 	 * that MFC is no longer processing */
 	s5p_mfc_release_priv_buf(dev, &dev->fw_buf);
+	dev->fw_get_done = false;
 	return 0;
 }
 
@@ -239,6 +235,10 @@ int s5p_mfc_init_hw(struct s5p_mfc_dev *dev)
 	}
 	else
 		mfc_write(dev, 0x3ff, S5P_FIMV_SW_RESET);
+
+	if (IS_MFCV10(dev))
+		mfc_write(dev, 0x0, S5P_FIMV_MFC_CLOCK_OFF_V10);
+
 	mfc_debug(2, "Will now wait for completion of firmware transfer\n");
 	if (s5p_mfc_wait_for_done_dev(dev, S5P_MFC_R2H_CMD_FW_STATUS_RET)) {
 		mfc_err("Failed to load firmware\n");
@@ -399,7 +399,7 @@ int s5p_mfc_wakeup(struct s5p_mfc_dev *dev)
 	s5p_mfc_clear_cmds(dev);
 	s5p_mfc_clean_dev_int_flags(dev);
 	/* 3. Send MFC wakeup command and wait for completion*/
-	if (IS_MFCV8(dev))
+	if (IS_MFCV8_PLUS(dev))
 		ret = s5p_mfc_v8_wait_wakeup(dev);
 	else
 		ret = s5p_mfc_wait_wakeup(dev);

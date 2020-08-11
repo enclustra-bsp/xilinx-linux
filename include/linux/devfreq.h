@@ -1,13 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * devfreq: Generic Dynamic Voltage and Frequency Scaling (DVFS) Framework
  *	    for Non-CPU Devices.
  *
  * Copyright (C) 2011 Samsung Electronics
  *	MyungJoo Ham <myungjoo.ham@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __LINUX_DEVFREQ_H__
@@ -18,6 +15,13 @@
 #include <linux/pm_opp.h>
 
 #define DEVFREQ_NAME_LEN 16
+
+/* DEVFREQ governor name */
+#define DEVFREQ_GOV_SIMPLE_ONDEMAND	"simple_ondemand"
+#define DEVFREQ_GOV_PERFORMANCE		"performance"
+#define DEVFREQ_GOV_POWERSAVE		"powersave"
+#define DEVFREQ_GOV_USERSPACE		"userspace"
+#define DEVFREQ_GOV_PASSIVE		"passive"
 
 /* DEVFREQ notifier interface */
 #define DEVFREQ_TRANSITION_NOTIFIER	(0)
@@ -84,8 +88,9 @@ struct devfreq_dev_status {
  *			from devfreq_remove_device() call. If the user
  *			has registered devfreq->nb at a notifier-head,
  *			this is the time to unregister it.
- * @freq_table:	Optional list of frequencies to support statistics.
- * @max_state:	The size of freq_table.
+ * @freq_table:		Optional list of frequencies to support statistics
+ *			and freq_table must be generated in ascending order.
+ * @max_state:		The size of freq_table.
  */
 struct devfreq_dev_profile {
 	unsigned long initial_freq;
@@ -120,7 +125,12 @@ struct devfreq_dev_profile {
  *		touch this.
  * @min_freq:	Limit minimum frequency requested by user (0: none)
  * @max_freq:	Limit maximum frequency requested by user (0: none)
+ * @scaling_min_freq:	Limit minimum frequency requested by OPP interface
+ * @scaling_max_freq:	Limit maximum frequency requested by OPP interface
  * @stop_polling:	 devfreq polling status of a device.
+ * @suspend_freq:	 frequency of a device set during suspend phase.
+ * @resume_freq:	 frequency of a device set in resume phase.
+ * @suspend_count:	 suspend requests counter for a device.
  * @total_trans:	Number of devfreq transitions
  * @trans_table:	Statistics of devfreq transitions
  * @time_in_state:	Statistics of devfreq states
@@ -153,7 +163,13 @@ struct devfreq {
 
 	unsigned long min_freq;
 	unsigned long max_freq;
+	unsigned long scaling_min_freq;
+	unsigned long scaling_max_freq;
 	bool stop_polling;
+
+	unsigned long suspend_freq;
+	unsigned long resume_freq;
+	atomic_t suspend_count;
 
 	/* information for device frequency transition */
 	unsigned int total_trans;
@@ -185,6 +201,17 @@ extern void devm_devfreq_remove_device(struct device *dev,
 /* Supposed to be called by PM callbacks */
 extern int devfreq_suspend_device(struct devfreq *devfreq);
 extern int devfreq_resume_device(struct devfreq *devfreq);
+
+extern void devfreq_suspend(void);
+extern void devfreq_resume(void);
+
+/**
+ * update_devfreq() - Reevaluate the device and configure frequency
+ * @devfreq:	the devfreq device
+ *
+ * Note: devfreq->lock must be held
+ */
+extern int update_devfreq(struct devfreq *devfreq);
 
 /* Helper functions for devfreq user device driver with OPP. */
 extern struct dev_pm_opp *devfreq_recommended_opp(struct device *dev,
@@ -303,6 +330,9 @@ static inline int devfreq_resume_device(struct devfreq *devfreq)
 {
 	return 0;
 }
+
+static inline void devfreq_suspend(void) {}
+static inline void devfreq_resume(void) {}
 
 static inline struct dev_pm_opp *devfreq_recommended_opp(struct device *dev,
 					   unsigned long *freq, u32 flags)

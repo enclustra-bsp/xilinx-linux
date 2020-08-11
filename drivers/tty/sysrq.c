@@ -134,17 +134,10 @@ static struct sysrq_key_op sysrq_unraw_op = {
 
 static void sysrq_handle_crash(int key)
 {
-	char *killer = NULL;
-
-	/* we need to release the RCU read lock here,
-	 * otherwise we get an annoying
-	 * 'BUG: sleeping function called from invalid context'
-	 * complaint from the kernel before the panic.
-	 */
+	/* release the RCU read lock before crashing */
 	rcu_read_unlock();
-	panic_on_oops = 1;	/* force panic */
-	wmb();
-	*killer = 1;
+
+	panic("sysrq triggered crash\n");
 }
 static struct sysrq_key_op sysrq_crash_op = {
 	.handler	= sysrq_handle_crash,
@@ -215,7 +208,7 @@ static struct sysrq_key_op sysrq_showlocks_op = {
 #endif
 
 #ifdef CONFIG_SMP
-static DEFINE_SPINLOCK(show_lock);
+static DEFINE_RAW_SPINLOCK(show_lock);
 
 static void showacpu(void *dummy)
 {
@@ -225,10 +218,10 @@ static void showacpu(void *dummy)
 	if (idle_cpu(smp_processor_id()))
 		return;
 
-	spin_lock_irqsave(&show_lock, flags);
+	raw_spin_lock_irqsave(&show_lock, flags);
 	pr_info("CPU%d:\n", smp_processor_id());
 	show_stack(NULL, NULL);
-	spin_unlock_irqrestore(&show_lock, flags);
+	raw_spin_unlock_irqrestore(&show_lock, flags);
 }
 
 static void sysrq_showregs_othercpus(struct work_struct *dummy)
@@ -246,8 +239,10 @@ static void sysrq_handle_showallcpus(int key)
 	 * architecture has no support for it:
 	 */
 	if (!trigger_all_cpu_backtrace()) {
-		struct pt_regs *regs = get_irq_regs();
+		struct pt_regs *regs = NULL;
 
+		if (in_irq())
+			regs = get_irq_regs();
 		if (regs) {
 			pr_info("CPU%d:\n", smp_processor_id());
 			show_regs(regs);
@@ -266,7 +261,10 @@ static struct sysrq_key_op sysrq_showallcpus_op = {
 
 static void sysrq_handle_showregs(int key)
 {
-	struct pt_regs *regs = get_irq_regs();
+	struct pt_regs *regs = NULL;
+
+	if (in_irq())
+		regs = get_irq_regs();
 	if (regs)
 		show_regs(regs);
 	perf_event_print_debug();
@@ -343,7 +341,7 @@ static void send_sig_all(int sig)
 		if (is_global_init(p))
 			continue;
 
-		do_send_sig_info(sig, SEND_SIG_FORCED, p, true);
+		do_send_sig_info(sig, SEND_SIG_PRIV, p, PIDTYPE_MAX);
 	}
 	read_unlock(&tasklist_lock);
 }
@@ -529,7 +527,11 @@ void __handle_sysrq(int key, bool check_mask)
 {
 	struct sysrq_key_op *op_p;
 	int orig_log_level;
+	int orig_suppress_printk;
 	int i;
+
+	orig_suppress_printk = suppress_printk;
+	suppress_printk = 0;
 
 	rcu_sysrq_start();
 	rcu_read_lock();
@@ -541,7 +543,6 @@ void __handle_sysrq(int key, bool check_mask)
 	 */
 	orig_log_level = console_loglevel;
 	console_loglevel = CONSOLE_LOGLEVEL_DEFAULT;
-	pr_info("SysRq : ");
 
         op_p = __sysrq_get_key_op(key);
         if (op_p) {
@@ -550,14 +551,15 @@ void __handle_sysrq(int key, bool check_mask)
 		 * should not) and is the invoked operation enabled?
 		 */
 		if (!check_mask || sysrq_on_mask(op_p->enable_mask)) {
-			pr_cont("%s\n", op_p->action_msg);
+			pr_info("%s\n", op_p->action_msg);
 			console_loglevel = orig_log_level;
 			op_p->handler(key);
 		} else {
-			pr_cont("This sysrq operation is disabled.\n");
+			pr_info("This sysrq operation is disabled.\n");
+			console_loglevel = orig_log_level;
 		}
 	} else {
-		pr_cont("HELP : ");
+		pr_info("HELP : ");
 		/* Only print the help msg once per handler */
 		for (i = 0; i < ARRAY_SIZE(sysrq_key_table); i++) {
 			if (sysrq_key_table[i]) {
@@ -576,6 +578,8 @@ void __handle_sysrq(int key, bool check_mask)
 	}
 	rcu_read_unlock();
 	rcu_sysrq_end();
+
+	suppress_printk = orig_suppress_printk;
 }
 
 void handle_sysrq(int key)
@@ -649,14 +653,13 @@ static void sysrq_parse_reset_sequence(struct sysrq_state *state)
 	state->reset_seq_version = sysrq_reset_seq_version;
 }
 
-static void sysrq_do_reset(unsigned long _state)
+static void sysrq_do_reset(struct timer_list *t)
 {
-	struct sysrq_state *state = (struct sysrq_state *) _state;
+	struct sysrq_state *state = from_timer(state, t, keyreset_timer);
 
 	state->reset_requested = true;
 
-	sys_sync();
-	kernel_restart(NULL);
+	orderly_reboot();
 }
 
 static void sysrq_handle_reset_request(struct sysrq_state *state)
@@ -668,7 +671,7 @@ static void sysrq_handle_reset_request(struct sysrq_state *state)
 		mod_timer(&state->keyreset_timer,
 			jiffies + msecs_to_jiffies(sysrq_reset_downtime_ms));
 	else
-		sysrq_do_reset((unsigned long)state);
+		sysrq_do_reset(&state->keyreset_timer);
 }
 
 static void sysrq_detect_reset_sequence(struct sysrq_state *state,
@@ -731,6 +734,8 @@ static void sysrq_of_get_keyreset_config(void)
 
 	/* Get reset timeout if any. */
 	of_property_read_u32(np, "timeout-ms", &sysrq_reset_downtime_ms);
+
+	of_node_put(np);
 }
 #else
 static void sysrq_of_get_keyreset_config(void)
@@ -904,8 +909,7 @@ static int sysrq_connect(struct input_handler *handler,
 	sysrq->handle.handler = handler;
 	sysrq->handle.name = "sysrq";
 	sysrq->handle.private = sysrq;
-	setup_timer(&sysrq->keyreset_timer,
-		    sysrq_do_reset, (unsigned long)sysrq);
+	timer_setup(&sysrq->keyreset_timer, sysrq_do_reset, 0);
 
 	error = input_register_handle(&sysrq->handle);
 	if (error) {

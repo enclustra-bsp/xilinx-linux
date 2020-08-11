@@ -16,7 +16,7 @@
 #include <asm/processor.h>
 #include <asm/ctl_reg.h>
 #include <asm/extable.h>
-
+#include <asm/facility.h>
 
 /*
  * The fs value determines whether argument validity checking should be
@@ -26,27 +26,15 @@
  * For historical reasons, these macros are grossly misnamed.
  */
 
-#define MAKE_MM_SEG(a)  ((mm_segment_t) { (a) })
+#define KERNEL_DS	(0)
+#define KERNEL_DS_SACF	(1)
+#define USER_DS		(2)
+#define USER_DS_SACF	(3)
 
-
-#define KERNEL_DS       MAKE_MM_SEG(0)
-#define USER_DS         MAKE_MM_SEG(1)
-
-#define get_ds()        (KERNEL_DS)
 #define get_fs()        (current->thread.mm_segment)
-#define segment_eq(a,b) ((a).ar4 == (b).ar4)
+#define segment_eq(a,b) (((a) & 2) == ((b) & 2))
 
-static inline void set_fs(mm_segment_t fs)
-{
-	current->thread.mm_segment = fs;
-	if (uaccess_kernel()) {
-		set_cpu_flag(CIF_ASCE_SECONDARY);
-		__ctl_load(S390_lowcore.kernel_asce, 7, 7);
-	} else {
-		clear_cpu_flag(CIF_ASCE_SECONDARY);
-		__ctl_load(S390_lowcore.user_asce, 7, 7);
-	}
-}
+void set_fs(mm_segment_t fs);
 
 static inline int __range_ok(unsigned long addr, unsigned long size)
 {
@@ -59,7 +47,7 @@ static inline int __range_ok(unsigned long addr, unsigned long size)
 	__range_ok((unsigned long)(addr), (size));	\
 })
 
-#define access_ok(type, addr, size) __access_ok(addr, size)
+#define access_ok(addr, size) __access_ok(addr, size)
 
 unsigned long __must_check
 raw_copy_from_user(void *to, const void __user *from, unsigned long n);
@@ -67,8 +55,10 @@ raw_copy_from_user(void *to, const void __user *from, unsigned long n);
 unsigned long __must_check
 raw_copy_to_user(void __user *to, const void *from, unsigned long n);
 
+#ifndef CONFIG_KASAN
 #define INLINE_COPY_FROM_USER
 #define INLINE_COPY_TO_USER
+#endif
 
 #ifdef CONFIG_HAVE_MARCH_Z10_FEATURES
 
@@ -93,9 +83,9 @@ raw_copy_to_user(void __user *to, const void *from, unsigned long n);
 	__rc;							\
 })
 
-static inline int __put_user_fn(void *x, void __user *ptr, unsigned long size)
+static __always_inline int __put_user_fn(void *x, void __user *ptr, unsigned long size)
 {
-	unsigned long spec = 0x810000UL;
+	unsigned long spec = 0x010000UL;
 	int rc;
 
 	switch (size) {
@@ -123,9 +113,9 @@ static inline int __put_user_fn(void *x, void __user *ptr, unsigned long size)
 	return rc;
 }
 
-static inline int __get_user_fn(void *x, const void __user *ptr, unsigned long size)
+static __always_inline int __get_user_fn(void *x, const void __user *ptr, unsigned long size)
 {
-	unsigned long spec = 0x81UL;
+	unsigned long spec = 0x01UL;
 	int rc;
 
 	switch (size) {

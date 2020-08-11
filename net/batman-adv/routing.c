@@ -1,18 +1,7 @@
-/* Copyright (C) 2007-2017  B.A.T.M.A.N. contributors:
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright (C) 2007-2019  B.A.T.M.A.N. contributors:
  *
  * Marek Lindner, Simon Wunderlich
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "routing.h"
@@ -33,6 +22,7 @@
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
 #include <linux/stddef.h>
+#include <uapi/linux/batadv_packet.h>
 
 #include "bitarray.h"
 #include "bridge_loop_avoidance.h"
@@ -43,7 +33,6 @@
 #include "log.h"
 #include "network-coding.h"
 #include "originator.h"
-#include "packet.h"
 #include "send.h"
 #include "soft-interface.h"
 #include "tp_meter.h"
@@ -54,7 +43,7 @@ static int batadv_route_unicast_packet(struct sk_buff *skb,
 				       struct batadv_hard_iface *recv_if);
 
 /**
- * _batadv_update_route - set the router for this originator
+ * _batadv_update_route() - set the router for this originator
  * @bat_priv: the bat priv with all the soft interface information
  * @orig_node: orig node which is to be configured
  * @recv_if: the receive interface for which this route is set
@@ -93,14 +82,14 @@ static void _batadv_update_route(struct batadv_priv *bat_priv,
 	batadv_orig_ifinfo_put(orig_ifinfo);
 
 	/* route deleted */
-	if ((curr_router) && (!neigh_node)) {
+	if (curr_router && !neigh_node) {
 		batadv_dbg(BATADV_DBG_ROUTES, bat_priv,
 			   "Deleting route towards: %pM\n", orig_node->orig);
 		batadv_tt_global_del_orig(bat_priv, orig_node, -1,
 					  "Deleted route towards originator");
 
 	/* route added */
-	} else if ((!curr_router) && (neigh_node)) {
+	} else if (!curr_router && neigh_node) {
 		batadv_dbg(BATADV_DBG_ROUTES, bat_priv,
 			   "Adding route towards: %pM (via %pM)\n",
 			   orig_node->orig, neigh_node->addr);
@@ -118,7 +107,7 @@ static void _batadv_update_route(struct batadv_priv *bat_priv,
 }
 
 /**
- * batadv_update_route - set the router for this originator
+ * batadv_update_route() - set the router for this originator
  * @bat_priv: the bat priv with all the soft interface information
  * @orig_node: orig node which is to be configured
  * @recv_if: the receive interface for which this route is set
@@ -145,7 +134,7 @@ out:
 }
 
 /**
- * batadv_window_protected - checks whether the host restarted and is in the
+ * batadv_window_protected() - checks whether the host restarted and is in the
  *  protection time.
  * @bat_priv: the bat priv with all the soft interface information
  * @seq_num_diff: difference between the current/received sequence number and
@@ -180,6 +169,14 @@ bool batadv_window_protected(struct batadv_priv *bat_priv, s32 seq_num_diff,
 	return false;
 }
 
+/**
+ * batadv_check_management_packet() - Check preconditions for management packets
+ * @skb: incoming packet buffer
+ * @hard_iface: incoming hard interface
+ * @header_len: minimal header length of packet type
+ *
+ * Return: true when management preconditions are met, false otherwise
+ */
 bool batadv_check_management_packet(struct sk_buff *skb,
 				    struct batadv_hard_iface *hard_iface,
 				    int header_len)
@@ -212,7 +209,7 @@ bool batadv_check_management_packet(struct sk_buff *skb,
 }
 
 /**
- * batadv_recv_my_icmp_packet - receive an icmp packet locally
+ * batadv_recv_my_icmp_packet() - receive an icmp packet locally
  * @bat_priv: the bat priv with all the soft interface information
  * @skb: icmp packet to process
  *
@@ -347,6 +344,13 @@ out:
 	return ret;
 }
 
+/**
+ * batadv_recv_icmp_packet() - Process incoming icmp packet
+ * @skb: incoming packet buffer
+ * @recv_if: incoming hard interface
+ *
+ * Return: NET_RX_SUCCESS on success or NET_RX_DROP in case of failure
+ */
 int batadv_recv_icmp_packet(struct sk_buff *skb,
 			    struct batadv_hard_iface *recv_if)
 {
@@ -381,7 +385,7 @@ int batadv_recv_icmp_packet(struct sk_buff *skb,
 	/* add record route information if not full */
 	if ((icmph->msg_type == BATADV_ECHO_REPLY ||
 	     icmph->msg_type == BATADV_ECHO_REQUEST) &&
-	    (skb->len >= sizeof(struct batadv_icmp_packet_rr))) {
+	    skb->len >= sizeof(struct batadv_icmp_packet_rr)) {
 		if (skb_linearize(skb) < 0)
 			goto free_skb;
 
@@ -440,7 +444,7 @@ free_skb:
 }
 
 /**
- * batadv_check_unicast_packet - Check for malformed unicast packets
+ * batadv_check_unicast_packet() - Check for malformed unicast packets
  * @bat_priv: the bat priv with all the soft interface information
  * @skb: packet to check
  * @hdr_size: size of header to pull
@@ -478,7 +482,7 @@ static int batadv_check_unicast_packet(struct batadv_priv *bat_priv,
 }
 
 /**
- * batadv_last_bonding_get - Get last_bonding_candidate of orig_node
+ * batadv_last_bonding_get() - Get last_bonding_candidate of orig_node
  * @orig_node: originator node whose last bonding candidate should be retrieved
  *
  * Return: last bonding candidate of router or NULL if not found
@@ -501,7 +505,7 @@ batadv_last_bonding_get(struct batadv_orig_node *orig_node)
 }
 
 /**
- * batadv_last_bonding_replace - Replace last_bonding_candidate of orig_node
+ * batadv_last_bonding_replace() - Replace last_bonding_candidate of orig_node
  * @orig_node: originator node whose bonding candidates should be replaced
  * @new_candidate: new bonding candidate or NULL
  */
@@ -524,7 +528,7 @@ batadv_last_bonding_replace(struct batadv_orig_node *orig_node,
 }
 
 /**
- * batadv_find_router - find a suitable router for this originator
+ * batadv_find_router() - find a suitable router for this originator
  * @bat_priv: the bat priv with all the soft interface information
  * @orig_node: the destination node
  * @recv_if: pointer to interface this packet was received on
@@ -741,8 +745,9 @@ free_skb:
 }
 
 /**
- * batadv_reroute_unicast_packet - update the unicast header for re-routing
+ * batadv_reroute_unicast_packet() - update the unicast header for re-routing
  * @bat_priv: the bat priv with all the soft interface information
+ * @skb: unicast packet to process
  * @unicast_packet: the unicast header to be updated
  * @dst_addr: the payload destination
  * @vid: VLAN identifier
@@ -754,7 +759,7 @@ free_skb:
  * Return: true if the packet header has been updated, false otherwise
  */
 static bool
-batadv_reroute_unicast_packet(struct batadv_priv *bat_priv,
+batadv_reroute_unicast_packet(struct batadv_priv *bat_priv, struct sk_buff *skb,
 			      struct batadv_unicast_packet *unicast_packet,
 			      u8 *dst_addr, unsigned short vid)
 {
@@ -783,8 +788,10 @@ batadv_reroute_unicast_packet(struct batadv_priv *bat_priv,
 	}
 
 	/* update the packet header */
+	skb_postpull_rcsum(skb, unicast_packet, sizeof(*unicast_packet));
 	ether_addr_copy(unicast_packet->dest, orig_addr);
 	unicast_packet->ttvn = orig_ttvn;
+	skb_postpush_rcsum(skb, unicast_packet, sizeof(*unicast_packet));
 
 	ret = true;
 out:
@@ -825,7 +832,7 @@ static bool batadv_check_unicast_ttvn(struct batadv_priv *bat_priv,
 	 * the packet to
 	 */
 	if (batadv_tt_local_client_is_roaming(bat_priv, ethhdr->h_dest, vid)) {
-		if (batadv_reroute_unicast_packet(bat_priv, unicast_packet,
+		if (batadv_reroute_unicast_packet(bat_priv, skb, unicast_packet,
 						  ethhdr->h_dest, vid))
 			batadv_dbg_ratelimited(BATADV_DBG_TT,
 					       bat_priv,
@@ -871,7 +878,7 @@ static bool batadv_check_unicast_ttvn(struct batadv_priv *bat_priv,
 	 * destination can possibly be updated and forwarded towards the new
 	 * target host
 	 */
-	if (batadv_reroute_unicast_packet(bat_priv, unicast_packet,
+	if (batadv_reroute_unicast_packet(bat_priv, skb, unicast_packet,
 					  ethhdr->h_dest, vid)) {
 		batadv_dbg_ratelimited(BATADV_DBG_TT, bat_priv,
 				       "Rerouting unicast packet to %pM (dst=%pM): TTVN mismatch old_ttvn=%u new_ttvn=%u\n",
@@ -894,17 +901,19 @@ static bool batadv_check_unicast_ttvn(struct batadv_priv *bat_priv,
 	if (!primary_if)
 		return false;
 
+	/* update the packet header */
+	skb_postpull_rcsum(skb, unicast_packet, sizeof(*unicast_packet));
 	ether_addr_copy(unicast_packet->dest, primary_if->net_dev->dev_addr);
+	unicast_packet->ttvn = curr_ttvn;
+	skb_postpush_rcsum(skb, unicast_packet, sizeof(*unicast_packet));
 
 	batadv_hardif_put(primary_if);
-
-	unicast_packet->ttvn = curr_ttvn;
 
 	return true;
 }
 
 /**
- * batadv_recv_unhandled_unicast_packet - receive and process packets which
+ * batadv_recv_unhandled_unicast_packet() - receive and process packets which
  *	are in the unicast number space but not yet known to the implementation
  * @skb: unicast tvlv packet to process
  * @recv_if: pointer to interface this packet was received on
@@ -935,6 +944,13 @@ free_skb:
 	return NET_RX_DROP;
 }
 
+/**
+ * batadv_recv_unicast_packet() - Process incoming unicast packet
+ * @skb: incoming packet buffer
+ * @recv_if: incoming hard interface
+ *
+ * Return: NET_RX_SUCCESS on success or NET_RX_DROP in case of failure
+ */
 int batadv_recv_unicast_packet(struct sk_buff *skb,
 			       struct batadv_hard_iface *recv_if)
 {
@@ -945,14 +961,10 @@ int batadv_recv_unicast_packet(struct sk_buff *skb,
 	struct batadv_orig_node *orig_node = NULL, *orig_node_gw = NULL;
 	int check, hdr_size = sizeof(*unicast_packet);
 	enum batadv_subtype subtype;
-	struct ethhdr *ethhdr;
 	int ret = NET_RX_DROP;
 	bool is4addr, is_gw;
 
 	unicast_packet = (struct batadv_unicast_packet *)skb->data;
-	unicast_4addr_packet = (struct batadv_unicast_4addr_packet *)skb->data;
-	ethhdr = eth_hdr(skb);
-
 	is4addr = unicast_packet->packet_type == BATADV_UNICAST_4ADDR;
 	/* the caller function should have already pulled 2 bytes */
 	if (is4addr)
@@ -972,12 +984,14 @@ int batadv_recv_unicast_packet(struct sk_buff *skb,
 	if (!batadv_check_unicast_ttvn(bat_priv, skb, hdr_size))
 		goto free_skb;
 
+	unicast_packet = (struct batadv_unicast_packet *)skb->data;
+
 	/* packet for me */
 	if (batadv_is_my_mac(bat_priv, unicast_packet->dest)) {
 		/* If this is a unicast packet from another backgone gw,
 		 * drop it.
 		 */
-		orig_addr_gw = ethhdr->h_source;
+		orig_addr_gw = eth_hdr(skb)->h_source;
 		orig_node_gw = batadv_orig_hash_find(bat_priv, orig_addr_gw);
 		if (orig_node_gw) {
 			is_gw = batadv_bla_is_backbone_gw(skb, orig_node_gw,
@@ -992,6 +1006,8 @@ int batadv_recv_unicast_packet(struct sk_buff *skb,
 		}
 
 		if (is4addr) {
+			unicast_4addr_packet =
+				(struct batadv_unicast_4addr_packet *)skb->data;
 			subtype = unicast_4addr_packet->subtype;
 			batadv_dat_inc_counter(bat_priv, subtype);
 
@@ -1015,6 +1031,8 @@ int batadv_recv_unicast_packet(struct sk_buff *skb,
 							hdr_size))
 			goto rx_success;
 
+		batadv_dat_snoop_incoming_dhcp_ack(bat_priv, skb, hdr_size);
+
 		batadv_interface_rx(recv_if->soft_iface, skb, hdr_size,
 				    orig_node);
 
@@ -1036,7 +1054,7 @@ free_skb:
 }
 
 /**
- * batadv_recv_unicast_tvlv - receive and process unicast tvlv packets
+ * batadv_recv_unicast_tvlv() - receive and process unicast tvlv packets
  * @skb: unicast tvlv packet to process
  * @recv_if: pointer to interface this packet was received on
  *
@@ -1090,7 +1108,7 @@ free_skb:
 }
 
 /**
- * batadv_recv_frag_packet - process received fragment
+ * batadv_recv_frag_packet() - process received fragment
  * @skb: the received fragment
  * @recv_if: interface that the skb is received on
  *
@@ -1155,6 +1173,13 @@ free_skb:
 	return ret;
 }
 
+/**
+ * batadv_recv_bcast_packet() - Process incoming broadcast packet
+ * @skb: incoming packet buffer
+ * @recv_if: incoming hard interface
+ *
+ * Return: NET_RX_SUCCESS on success or NET_RX_DROP in case of failure
+ */
 int batadv_recv_bcast_packet(struct sk_buff *skb,
 			     struct batadv_hard_iface *recv_if)
 {
@@ -1242,6 +1267,8 @@ int batadv_recv_bcast_packet(struct sk_buff *skb,
 		goto rx_success;
 	if (batadv_dat_snoop_incoming_arp_reply(bat_priv, skb, hdr_size))
 		goto rx_success;
+
+	batadv_dat_snoop_incoming_dhcp_ack(bat_priv, skb, hdr_size);
 
 	/* broadcast for me */
 	batadv_interface_rx(recv_if->soft_iface, skb, hdr_size, orig_node);

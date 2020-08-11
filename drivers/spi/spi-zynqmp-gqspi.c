@@ -1,30 +1,27 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Xilinx Zynq UltraScale+ MPSoC Quad-SPI (QSPI) controller driver
  * (master mode only)
  *
  * Copyright (C) 2009 - 2015 Xilinx, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/dmaengine.h>
+#include <linux/firmware/xlnx-zynqmp.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of_irq.h>
 #include <linux/of_address.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/spi/spi.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
-#include <linux/firmware/xilinx/zynqmp/firmware.h>
 
 /* Generic QSPI register offsets */
 #define GQSPI_CONFIG_OFST		0x00000100
@@ -37,6 +34,7 @@
 #define GQSPI_RXD_OFST			0x00000120
 #define GQSPI_TX_THRESHOLD_OFST		0x00000128
 #define GQSPI_RX_THRESHOLD_OFST		0x0000012C
+#define IOU_TAPDLY_BYPASS_OFST		0x0000003C
 #define GQSPI_LPBK_DLY_ADJ_OFST		0x00000138
 #define GQSPI_GEN_FIFO_OFST		0x00000140
 #define GQSPI_SEL_OFST			0x00000144
@@ -154,6 +152,10 @@
 #define TAP_DLY_BYPASS_LQSPI_RX_VALUE	0x1
 #define TAP_DLY_BYPASS_LQSPI_RX_SHIFT	2
 
+/* set to differentiate versal from zynqmp, 1=versal, 0=zynqmp */
+#define QSPI_QUIRK_HAS_TAPDELAY	BIT(0)
+
+#define GQSPI_FREQ_37_5MHZ	37500000
 #define GQSPI_FREQ_40MHZ	40000000
 #define GQSPI_FREQ_100MHZ	100000000
 #define GQSPI_FREQ_150MHZ	150000000
@@ -161,6 +163,15 @@
 
 #define SPI_AUTOSUSPEND_TIMEOUT		3000
 enum mode_type {GQSPI_MODE_IO, GQSPI_MODE_DMA};
+static const struct zynqmp_eemi_ops *eemi_ops;
+
+/**
+ * struct zynq_platform_data - zynqmp qspi platform data structure
+ * @quirks:	Flags is used to identify the platform
+ */
+struct qspi_platform_data {
+	u32 quirks;
+};
 
 /**
  * struct zynqmp_qspi - Defines qspi driver instance
@@ -184,6 +195,7 @@ enum mode_type {GQSPI_MODE_IO, GQSPI_MODE_DMA};
  * @mode:		Defines the mode in which QSPI is operating
  * @speed_hz:		Current SPI bus clock speed in hz
  * @io_mode:		Defines the operating mode, either IO or dma
+ * @has_tapdelay:	Used for tapdelay register available in qspi
  */
 struct zynqmp_qspi {
 	void __iomem *regs;
@@ -206,6 +218,7 @@ struct zynqmp_qspi {
 	enum mode_type mode;
 	u32 speed_hz;
 	bool io_mode;
+	bool has_tapdelay;
 };
 
 /**
@@ -286,34 +299,51 @@ static void zynqmp_gqspi_selectslave(struct zynqmp_qspi *instanceptr,
  */
 static void zynqmp_qspi_set_tapdelay(struct zynqmp_qspi *xqspi, u32 baudrateval)
 {
-	u32 lpbkdlyadj = 0, datadlyadj = 0, clk_rate;
+	u32 tapdlybypass = 0, lpbkdlyadj = 0, datadlyadj = 0, clk_rate;
 	u32 reqhz = 0;
-	const struct zynqmp_eemi_ops *eemi_ops = zynqmp_pm_get_eemi_ops();
 
-	if (!eemi_ops || !eemi_ops->ioctl)
+	if (!eemi_ops->ioctl)
 		return;
 
 	clk_rate = clk_get_rate(xqspi->refclk);
 	reqhz = (clk_rate / (GQSPI_BAUD_DIV_SHIFT << baudrateval));
 
-	if (reqhz < GQSPI_FREQ_40MHZ) {
-		eemi_ops->ioctl(NODE_QSPI, IOCTL_SET_TAPDELAY_BYPASS,
-			       PM_TAPDELAY_QSPI, PM_TAPDELAY_BYPASS_ENABLE,
-			       NULL);
-	} else if (reqhz < GQSPI_FREQ_100MHZ) {
-		eemi_ops->ioctl(NODE_QSPI, IOCTL_SET_TAPDELAY_BYPASS,
-			       PM_TAPDELAY_QSPI, PM_TAPDELAY_BYPASS_ENABLE,
-			       NULL);
-		lpbkdlyadj = zynqmp_gqspi_read(xqspi, GQSPI_LPBK_DLY_ADJ_OFST);
-		lpbkdlyadj |= (GQSPI_LPBK_DLY_ADJ_USE_LPBK_MASK);
-		datadlyadj = zynqmp_gqspi_read(xqspi, GQSPI_DATA_DLY_ADJ_OFST);
-		datadlyadj |= ((GQSPI_USE_DATA_DLY << GQSPI_USE_DATA_DLY_SHIFT)
-				| (GQSPI_DATA_DLY_ADJ_VALUE <<
-					GQSPI_DATA_DLY_ADJ_SHIFT));
-	} else if (reqhz < GQSPI_FREQ_150MHZ) {
-		lpbkdlyadj = zynqmp_gqspi_read(xqspi, GQSPI_LPBK_DLY_ADJ_OFST);
-		lpbkdlyadj |= ((GQSPI_LPBK_DLY_ADJ_USE_LPBK_MASK) |
-				GQSPI_LPBK_DLY_ADJ_DLY_0);
+	if (!xqspi->has_tapdelay) {
+		if (reqhz <= GQSPI_FREQ_40MHZ) {
+			eemi_ops->ioctl(NODE_QSPI, IOCTL_SET_TAPDELAY_BYPASS,
+					   PM_TAPDELAY_QSPI,
+					   PM_TAPDELAY_BYPASS_ENABLE,
+					   NULL);
+		} else if (reqhz <= GQSPI_FREQ_100MHZ) {
+			eemi_ops->ioctl(NODE_QSPI, IOCTL_SET_TAPDELAY_BYPASS,
+					   PM_TAPDELAY_QSPI,
+					   PM_TAPDELAY_BYPASS_ENABLE,
+					   NULL);
+			lpbkdlyadj |= (GQSPI_LPBK_DLY_ADJ_USE_LPBK_MASK);
+			datadlyadj |= ((GQSPI_USE_DATA_DLY <<
+					GQSPI_USE_DATA_DLY_SHIFT)
+					| (GQSPI_DATA_DLY_ADJ_VALUE <<
+						GQSPI_DATA_DLY_ADJ_SHIFT));
+		} else if (reqhz <= GQSPI_FREQ_150MHZ) {
+			lpbkdlyadj |= GQSPI_LPBK_DLY_ADJ_USE_LPBK_MASK;
+		}
+	} else {
+		if (reqhz <= GQSPI_FREQ_37_5MHZ) {
+			tapdlybypass |= (TAP_DLY_BYPASS_LQSPI_RX_VALUE <<
+					TAP_DLY_BYPASS_LQSPI_RX_SHIFT);
+		} else if (reqhz <= GQSPI_FREQ_100MHZ) {
+			tapdlybypass |= (TAP_DLY_BYPASS_LQSPI_RX_VALUE <<
+					TAP_DLY_BYPASS_LQSPI_RX_SHIFT);
+			lpbkdlyadj |= (GQSPI_LPBK_DLY_ADJ_USE_LPBK_MASK);
+			datadlyadj |= (GQSPI_USE_DATA_DLY <<
+					GQSPI_USE_DATA_DLY_SHIFT);
+		} else if (reqhz <= GQSPI_FREQ_150MHZ) {
+			lpbkdlyadj |= (GQSPI_LPBK_DLY_ADJ_USE_LPBK_MASK
+				       | (GQSPI_LPBK_DLY_ADJ_DLY_1 <<
+					       GQSPI_LPBK_DLY_ADJ_DLY_1_SHIFT));
+		}
+		zynqmp_gqspi_write(xqspi,
+				   IOU_TAPDLY_BYPASS_OFST, tapdlybypass);
 	}
 
 	zynqmp_gqspi_write(xqspi, GQSPI_LPBK_DLY_ADJ_OFST, lpbkdlyadj);
@@ -408,12 +438,11 @@ static void zynqmp_qspi_init_hw(struct zynqmp_qspi *xqspi)
 	zynqmp_gqspi_selectslave(xqspi,
 				 GQSPI_SELECT_FLASH_CS_LOWER,
 				 GQSPI_SELECT_FLASH_BUS_LOWER);
-	if (!xqspi->io_mode) {
+	if (!xqspi->io_mode)
 		/* Initialize DMA */
 		zynqmp_gqspi_write(xqspi,
-			GQSPI_QSPIDMA_DST_CTRL_OFST,
-			GQSPI_QSPIDMA_DST_CTRL_RESET_VAL);
-	}
+				   GQSPI_QSPIDMA_DST_CTRL_OFST,
+				   GQSPI_QSPIDMA_DST_CTRL_RESET_VAL);
 	/* Enable the GQSPI */
 	zynqmp_gqspi_write(xqspi, GQSPI_EN_OFST, GQSPI_EN_MASK);
 }
@@ -478,21 +507,19 @@ static void zynqmp_qspi_chipselect(struct spi_device *qspi, bool is_high)
 	u32 genfifoentry = 0x0, statusreg;
 
 	genfifoentry |= GQSPI_GENFIFO_MODE_SPI;
-
 	if (qspi->master->flags & SPI_MASTER_BOTH_CS) {
 		zynqmp_gqspi_selectslave(xqspi,
-			GQSPI_SELECT_FLASH_CS_BOTH,
-			GQSPI_SELECT_FLASH_BUS_BOTH);
+					 GQSPI_SELECT_FLASH_CS_BOTH,
+					 GQSPI_SELECT_FLASH_BUS_BOTH);
 	} else if (qspi->master->flags & SPI_MASTER_U_PAGE) {
 		zynqmp_gqspi_selectslave(xqspi,
-			GQSPI_SELECT_FLASH_CS_UPPER,
-			GQSPI_SELECT_FLASH_BUS_LOWER);
+					 GQSPI_SELECT_FLASH_CS_UPPER,
+					 GQSPI_SELECT_FLASH_BUS_LOWER);
 	} else {
 		zynqmp_gqspi_selectslave(xqspi,
-			GQSPI_SELECT_FLASH_CS_LOWER,
-			GQSPI_SELECT_FLASH_BUS_LOWER);
+					 GQSPI_SELECT_FLASH_CS_LOWER,
+					 GQSPI_SELECT_FLASH_BUS_LOWER);
 	}
-
 	genfifoentry |= xqspi->genfifobus;
 
 	if (!is_high) {
@@ -505,8 +532,6 @@ static void zynqmp_qspi_chipselect(struct spi_device *qspi, bool is_high)
 
 	zynqmp_gqspi_write(xqspi, GQSPI_GEN_FIFO_OFST, genfifoentry);
 
-	/* Dummy generic FIFO entry */
-	zynqmp_gqspi_write(xqspi, GQSPI_GEN_FIFO_OFST, 0x0);
 
 	/* Manually start the generic FIFO command */
 	zynqmp_gqspi_write(xqspi, GQSPI_CONFIG_OFST,
@@ -622,17 +647,19 @@ static void zynqmp_qspi_filltxfifo(struct zynqmp_qspi *xqspi, int size)
 	u32 count = 0, intermediate;
 
 	while ((xqspi->bytes_to_transfer > 0) && (count < size)) {
-		memcpy(&intermediate, xqspi->txbuf, 4);
-		zynqmp_gqspi_write(xqspi, GQSPI_TXD_OFST, intermediate);
-
 		if (xqspi->bytes_to_transfer >= 4) {
+			memcpy(&intermediate, xqspi->txbuf, 4);
 			xqspi->txbuf += 4;
 			xqspi->bytes_to_transfer -= 4;
+			count += 4;
 		} else {
+			memcpy(&intermediate, xqspi->txbuf,
+			       xqspi->bytes_to_transfer);
 			xqspi->txbuf += xqspi->bytes_to_transfer;
 			xqspi->bytes_to_transfer = 0;
+			count += xqspi->bytes_to_transfer;
 		}
-		count++;
+		zynqmp_gqspi_write(xqspi, GQSPI_TXD_OFST, intermediate);
 	}
 }
 
@@ -650,7 +677,7 @@ static void zynqmp_qspi_readrxfifo(struct zynqmp_qspi *xqspi, u32 size)
 	while ((count < size) && (xqspi->bytes_to_receive > 0)) {
 		if (xqspi->bytes_to_receive >= 4) {
 			(*(u32 *) xqspi->rxbuf) =
-				zynqmp_gqspi_read(xqspi, GQSPI_RXD_OFST);
+			zynqmp_gqspi_read(xqspi, GQSPI_RXD_OFST);
 			xqspi->rxbuf += 4;
 			xqspi->bytes_to_receive -= 4;
 			count += 4;
@@ -673,8 +700,8 @@ static void zynqmp_qspi_readrxfifo(struct zynqmp_qspi *xqspi, u32 size)
  *			GENFIFO	mask is returned to calling function
  */
 static void zynqmp_qspi_preparedummy(struct zynqmp_qspi *xqspi,
-					struct spi_transfer *transfer,
-					u32 *genfifoentry)
+				     struct spi_transfer *transfer,
+				     u32 *genfifoentry)
 {
 	/* For dummy Tx and Rx are NULL */
 	*genfifoentry &= ~(GQSPI_GENFIFO_TX | GQSPI_GENFIFO_RX);
@@ -682,10 +709,10 @@ static void zynqmp_qspi_preparedummy(struct zynqmp_qspi *xqspi,
 	/* SPI mode */
 	*genfifoentry &= ~GQSPI_GENFIFO_MODE_QUADSPI;
 	if (xqspi->rx_bus_width == GQSPI_RX_BUS_WIDTH_QUAD ||
-			xqspi->tx_bus_width == GQSPI_TX_BUS_WIDTH_QUAD)
+	    xqspi->tx_bus_width == GQSPI_TX_BUS_WIDTH_QUAD)
 		*genfifoentry |= GQSPI_GENFIFO_MODE_QUADSPI;
 	else if (xqspi->rx_bus_width == GQSPI_RX_BUS_WIDTH_DUAL ||
-			xqspi->tx_bus_width == GQSPI_TX_BUS_WIDTH_DUAL)
+		 xqspi->tx_bus_width == GQSPI_TX_BUS_WIDTH_DUAL)
 		*genfifoentry |= GQSPI_GENFIFO_MODE_DUALSPI;
 	else
 		*genfifoentry |= GQSPI_GENFIFO_MODE_SPI;
@@ -694,7 +721,7 @@ static void zynqmp_qspi_preparedummy(struct zynqmp_qspi *xqspi,
 	*genfifoentry &= ~GQSPI_GENFIFO_IMM_DATA_MASK;
 
 	if (transfer->dummy)
-		*genfifoentry |= transfer->dummy;
+		*genfifoentry |= (transfer->dummy / transfer->tx_nbits);
 }
 
 /**
@@ -789,7 +816,7 @@ static irqreturn_t zynqmp_qspi_irq(int irq, void *dev_id)
 		ret = IRQ_HANDLED;
 	}
 	if (!(mask & GQSPI_IER_RXEMPTY_MASK) &&
-		(mask & GQSPI_IER_GENFIFOEMPTY_MASK)) {
+	    (mask & GQSPI_IER_GENFIFOEMPTY_MASK)) {
 		zynqmp_qspi_readrxfifo(xqspi, GQSPI_RX_FIFO_FILL);
 		ret = IRQ_HANDLED;
 	}
@@ -843,9 +870,9 @@ static void zynq_qspi_setuprxdma(struct zynqmp_qspi *xqspi)
 	dma_addr_t addr;
 	u64 dma_align =  (u64)(uintptr_t)xqspi->rxbuf;
 
-	if (((xqspi->bytes_to_receive < 8) || (xqspi->io_mode)) ||
-		((dma_align & GQSPI_DMA_UNALIGN) != 0x0) ||
-		is_vmalloc_addr(xqspi->rxbuf)) {
+	if ((xqspi->bytes_to_receive < 8 || xqspi->io_mode) ||
+	    ((dma_align & GQSPI_DMA_UNALIGN) != 0x0) ||
+	    is_vmalloc_addr(xqspi->rxbuf)) {
 		/* Setting to IO mode */
 		config_reg = zynqmp_gqspi_read(xqspi, GQSPI_CONFIG_OFST);
 		config_reg &= ~GQSPI_CFG_MODE_EN_MASK;
@@ -860,10 +887,8 @@ static void zynq_qspi_setuprxdma(struct zynqmp_qspi *xqspi)
 
 	addr = dma_map_single(xqspi->dev, (void *)xqspi->rxbuf,
 						rx_bytes, DMA_FROM_DEVICE);
-	if (dma_mapping_error(xqspi->dev, addr)) {
+	if (dma_mapping_error(xqspi->dev, addr))
 		dev_err(xqspi->dev, "ERR:rxdma:memory not mapped\n");
-		return;
-	}
 
 	xqspi->dma_rx_bytes = rx_bytes;
 	xqspi->dma_addr = addr;
@@ -909,7 +934,8 @@ static void zynqmp_qspi_txrxsetup(struct zynqmp_qspi *xqspi,
 		*genfifoentry |= GQSPI_GENFIFO_TX;
 		*genfifoentry |=
 			zynqmp_qspi_selectspimode(xqspi, transfer->tx_nbits);
-		xqspi->bytes_to_transfer = transfer->len - (transfer->dummy/8);
+		xqspi->bytes_to_transfer = transfer->len -
+			(transfer->dummy / 8);
 		if (xqspi->mode == GQSPI_MODE_DMA) {
 			config_reg = zynqmp_gqspi_read(xqspi,
 							GQSPI_CONFIG_OFST);
@@ -965,16 +991,16 @@ static int zynqmp_qspi_start_transfer(struct spi_master *master,
 	genfifoentry |= xqspi->genfifocs;
 	genfifoentry |= xqspi->genfifobus;
 
-	if ((!xqspi->isinstr) &&
-		(master->flags & SPI_MASTER_DATA_STRIPE))
-		genfifoentry |= GQSPI_GENFIFO_STRIPE;
-
+	if (!xqspi->isinstr && (master->flags & SPI_MASTER_DATA_STRIPE)) {
+		if (transfer->stripe)
+			genfifoentry |= GQSPI_GENFIFO_STRIPE;
+	}
 	zynqmp_qspi_txrxsetup(xqspi, transfer, &genfifoentry);
 
 	if (xqspi->mode == GQSPI_MODE_DMA)
 		transfer_len = xqspi->dma_rx_bytes;
 	else
-		transfer_len = transfer->len - (transfer->dummy/8);
+		transfer_len = transfer->len - (transfer->dummy / 8);
 
 	xqspi->genfifoentry = genfifoentry;
 	if ((transfer_len) < GQSPI_GENFIFO_IMM_DATA_MASK) {
@@ -983,9 +1009,9 @@ static int zynqmp_qspi_start_transfer(struct spi_master *master,
 		zynqmp_gqspi_write(xqspi, GQSPI_GEN_FIFO_OFST, genfifoentry);
 		if (transfer->dummy || transfer->tx_nbits >= 1) {
 			zynqmp_qspi_preparedummy(xqspi, transfer,
-					&genfifoentry);
+						 &genfifoentry);
 			zynqmp_gqspi_write(xqspi, GQSPI_GEN_FIFO_OFST,
-					genfifoentry);
+					   genfifoentry);
 		}
 	} else {
 		int tempcount = transfer_len;
@@ -1014,10 +1040,12 @@ static int zynqmp_qspi_start_transfer(struct spi_master *master,
 			genfifoentry &= ~GQSPI_GENFIFO_EXP;
 			genfifoentry &= ~GQSPI_GENFIFO_IMM_DATA_MASK;
 			if (imm_data % 4 != 0) {
-				if (((imm_data + 4 - (imm_data % 4)) & 0xFF) == 0x00)
+				if (((imm_data + 4 -
+				      (imm_data % 4)) & 0xFF) == 0x00)
 					imm_data = 0xFF;
 				else
-					imm_data = imm_data + 4 - (imm_data % 4);
+					imm_data = imm_data + 4 - (imm_data
+								   % 4);
 			}
 			genfifoentry |= (u8) (imm_data & 0xFF);
 			zynqmp_gqspi_write(xqspi,
@@ -1069,8 +1097,7 @@ static int zynqmp_qspi_start_transfer(struct spi_master *master,
  */
 static int __maybe_unused zynqmp_qspi_suspend(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct spi_master *master = platform_get_drvdata(pdev);
+	struct spi_master *master = dev_get_drvdata(dev);
 
 	spi_master_suspend(master);
 
@@ -1090,8 +1117,7 @@ static int __maybe_unused zynqmp_qspi_suspend(struct device *dev)
  */
 static int __maybe_unused zynqmp_qspi_resume(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct spi_master *master = platform_get_drvdata(pdev);
+	struct spi_master *master = dev_get_drvdata(dev);
 	struct zynqmp_qspi *xqspi = spi_master_get_devdata(master);
 	int ret = 0;
 
@@ -1113,7 +1139,6 @@ static int __maybe_unused zynqmp_qspi_resume(struct device *dev)
 
 	clk_disable(xqspi->refclk);
 	clk_disable(xqspi->pclk);
-
 	return 0;
 }
 
@@ -1127,8 +1152,7 @@ static int __maybe_unused zynqmp_qspi_resume(struct device *dev)
  */
 static int __maybe_unused zynqmp_runtime_suspend(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct spi_master *master = platform_get_drvdata(pdev);
+	struct spi_master *master = dev_get_drvdata(dev);
 	struct zynqmp_qspi *xqspi = spi_master_get_devdata(master);
 
 	clk_disable(xqspi->refclk);
@@ -1147,8 +1171,7 @@ static int __maybe_unused zynqmp_runtime_suspend(struct device *dev)
  */
 static int __maybe_unused zynqmp_runtime_resume(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct spi_master *master = platform_get_drvdata(pdev);
+	struct spi_master *master = dev_get_drvdata(dev);
 	struct zynqmp_qspi *xqspi = spi_master_get_devdata(master);
 	int ret;
 
@@ -1170,8 +1193,7 @@ static int __maybe_unused zynqmp_runtime_resume(struct device *dev)
 
 static int __maybe_unused zynqmp_runtime_idle(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct spi_master *master = platform_get_drvdata(pdev);
+	struct spi_master *master = dev_get_drvdata(dev);
 	struct zynqmp_qspi *xqspi = spi_master_get_devdata(master);
 	u32 value;
 
@@ -1188,6 +1210,16 @@ static const struct dev_pm_ops zynqmp_qspi_dev_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(zynqmp_qspi_suspend, zynqmp_qspi_resume)
 };
 
+static const struct qspi_platform_data versal_qspi_def = {
+	.quirks = QSPI_QUIRK_HAS_TAPDELAY,
+};
+
+static const struct of_device_id zynqmp_qspi_of_match[] = {
+	{ .compatible = "xlnx,zynqmp-qspi-1.0"},
+	{ .compatible = "xlnx,versal-qspi-1.0", .data = &versal_qspi_def },
+	{ /* End of table */ }
+};
+
 /**
  * zynqmp_qspi_probe -	Probe method for the QSPI driver
  * @pdev:	Pointer to the platform_device structure
@@ -1201,12 +1233,16 @@ static int zynqmp_qspi_probe(struct platform_device *pdev)
 	int ret = 0;
 	struct spi_master *master;
 	struct zynqmp_qspi *xqspi;
-	struct resource *res;
 	struct device *dev = &pdev->dev;
 	struct device_node *nc;
+	const struct of_device_id *match;
 	u32 num_cs;
 	u32 rx_bus_width;
 	u32 tx_bus_width;
+
+	eemi_ops = zynqmp_pm_get_eemi_ops();
+	if (IS_ERR(eemi_ops))
+		return PTR_ERR(eemi_ops);
 
 	master = spi_alloc_master(&pdev->dev, sizeof(*xqspi));
 	if (!master)
@@ -1216,8 +1252,14 @@ static int zynqmp_qspi_probe(struct platform_device *pdev)
 	master->dev.of_node = pdev->dev.of_node;
 	platform_set_drvdata(pdev, master);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	xqspi->regs = devm_ioremap_resource(&pdev->dev, res);
+	match = of_match_node(zynqmp_qspi_of_match, pdev->dev.of_node);
+	if (match) {
+		const struct qspi_platform_data *p_data = match->data;
+
+		if (p_data && (p_data->quirks & QSPI_QUIRK_HAS_TAPDELAY))
+			xqspi->has_tapdelay = true;
+	}
+	xqspi->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(xqspi->regs)) {
 		ret = PTR_ERR(xqspi->regs);
 		goto remove_master;
@@ -1263,7 +1305,6 @@ static int zynqmp_qspi_probe(struct platform_device *pdev)
 
 	pm_runtime_mark_last_busy(&pdev->dev);
 	pm_runtime_put_autosuspend(&pdev->dev);
-
 	xqspi->irq = platform_get_irq(pdev, 0);
 	if (xqspi->irq <= 0) {
 		ret = -ENXIO;
@@ -1281,7 +1322,7 @@ static int zynqmp_qspi_probe(struct platform_device *pdev)
 	xqspi->rx_bus_width = GQSPI_RX_BUS_WIDTH_SINGLE;
 	for_each_available_child_of_node(pdev->dev.of_node, nc) {
 		ret = of_property_read_u32(nc, "spi-rx-bus-width",
-					&rx_bus_width);
+					   &rx_bus_width);
 		if (!ret) {
 			xqspi->rx_bus_width = rx_bus_width;
 			break;
@@ -1293,7 +1334,7 @@ static int zynqmp_qspi_probe(struct platform_device *pdev)
 	xqspi->tx_bus_width = GQSPI_TX_BUS_WIDTH_SINGLE;
 	for_each_available_child_of_node(pdev->dev.of_node, nc) {
 		ret = of_property_read_u32(nc, "spi-tx-bus-width",
-					&tx_bus_width);
+					   &tx_bus_width);
 		if (!ret) {
 			xqspi->tx_bus_width = tx_bus_width;
 			break;
@@ -1368,11 +1409,6 @@ static int zynqmp_qspi_remove(struct platform_device *pdev)
 
 	return 0;
 }
-
-static const struct of_device_id zynqmp_qspi_of_match[] = {
-	{ .compatible = "xlnx,zynqmp-qspi-1.0", },
-	{ /* End of table */ }
-};
 
 MODULE_DEVICE_TABLE(of, zynqmp_qspi_of_match);
 

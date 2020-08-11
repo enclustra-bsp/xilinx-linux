@@ -374,6 +374,7 @@ static int finish_dma_single(struct cvm_mmc_host *host, struct mmc_data *data)
 {
 	data->bytes_xfered = data->blocks * data->blksz;
 	data->error = 0;
+	dma_unmap_sg(host->dev, data->sg, data->sg_len, get_dma_dir(data));
 	return 1;
 }
 
@@ -967,7 +968,7 @@ static int cvm_mmc_of_parse(struct device *dev, struct cvm_mmc_slot *slot)
 	}
 
 	ret = mmc_regulator_get_supply(mmc);
-	if (ret == -EPROBE_DEFER)
+	if (ret)
 		return ret;
 	/*
 	 * Legacy Octeon firmware has no regulator entry, fall-back to
@@ -1046,7 +1047,8 @@ int cvm_mmc_of_slot_probe(struct device *dev, struct cvm_mmc_host *host)
 		mmc->max_segs = 1;
 
 	/* DMA size field can address up to 8 MB */
-	mmc->max_seg_size = 8 * 1024 * 1024;
+	mmc->max_seg_size = min_t(unsigned int, 8 * 1024 * 1024,
+				  dma_get_max_seg_size(host->dev));
 	mmc->max_req_size = mmc->max_seg_size;
 	/* External DMA is in 512 byte blocks */
 	mmc->max_blk_size = 512;

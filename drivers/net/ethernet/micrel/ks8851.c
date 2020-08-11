@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* drivers/net/ethernet/micrel/ks8851.c
  *
  * Copyright 2009 Simtec Electronics
  *	http://www.simtec.co.uk/
  *	Ben Dooks <ben@simtec.co.uk>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -28,6 +25,7 @@
 #include <linux/spi/spi.h>
 #include <linux/gpio.h>
 #include <linux/of_gpio.h>
+#include <linux/of_net.h>
 
 #include "ks8851.h"
 
@@ -140,6 +138,12 @@ struct ks8851_net {
 };
 
 static int msg_enable;
+
+/* SPI frame opcodes */
+#define KS_SPIOP_RD	(0x00)
+#define KS_SPIOP_WR	(0x40)
+#define KS_SPIOP_RXFIFO	(0x80)
+#define KS_SPIOP_TXFIFO	(0xC0)
 
 /* shift for byte-enable data */
 #define BYTE_EN(_x)	((_x) << 2)
@@ -407,15 +411,23 @@ static void ks8851_read_mac_addr(struct net_device *dev)
  * @ks: The device structure
  *
  * Get or create the initial mac address for the device and then set that
- * into the station address register. If there is an EEPROM present, then
+ * into the station address register. A mac address supplied in the device
+ * tree takes precedence. Otherwise, if there is an EEPROM present, then
  * we try that. If no valid mac address is found we use eth_random_addr()
  * to create a new one.
  */
 static void ks8851_init_mac(struct ks8851_net *ks)
 {
 	struct net_device *dev = ks->netdev;
+	const u8 *mac_addr;
 
-	/* first, try reading what we've got already */
+	mac_addr = of_get_mac_address(ks->spidev->dev.of_node);
+	if (!IS_ERR(mac_addr)) {
+		ether_addr_copy(dev->dev_addr, mac_addr);
+		ks8851_write_mac_addr(dev);
+		return;
+	}
+
 	if (ks->rc_ccr & CCR_EEPROM) {
 		ks8851_read_mac_addr(dev);
 		if (is_valid_ether_addr(dev->dev_addr))
@@ -526,9 +538,8 @@ static void ks8851_rx_pkts(struct ks8851_net *ks)
 		/* set dma read address */
 		ks8851_wrreg16(ks, KS_RXFDPR, RXFDPR_RXFPAI | 0x00);
 
-		/* start the packet dma process, and set auto-dequeue rx */
-		ks8851_wrreg16(ks, KS_RXQCR,
-			       ks->rc_rxqcr | RXQCR_SDA | RXQCR_ADRFE);
+		/* start DMA access */
+		ks8851_wrreg16(ks, KS_RXQCR, ks->rc_rxqcr | RXQCR_SDA);
 
 		if (rxlen > 4) {
 			unsigned int rxalign;
@@ -559,7 +570,8 @@ static void ks8851_rx_pkts(struct ks8851_net *ks)
 			}
 		}
 
-		ks8851_wrreg16(ks, KS_RXQCR, ks->rc_rxqcr);
+		/* end DMA access and dequeue packet */
+		ks8851_wrreg16(ks, KS_RXQCR, ks->rc_rxqcr | RXQCR_RRXEF);
 	}
 }
 
@@ -776,6 +788,15 @@ static void ks8851_tx_work(struct work_struct *work)
 static int ks8851_net_open(struct net_device *dev)
 {
 	struct ks8851_net *ks = netdev_priv(dev);
+	int ret;
+
+	ret = request_threaded_irq(dev->irq, NULL, ks8851_irq,
+				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
+				   dev->name, ks);
+	if (ret < 0) {
+		netdev_err(dev, "failed to get irq\n");
+		return ret;
+	}
 
 	/* lock the card, even if we may not actually be doing anything
 	 * else at the moment */
@@ -840,6 +861,7 @@ static int ks8851_net_open(struct net_device *dev)
 	netif_dbg(ks, ifup, ks->netdev, "network device up\n");
 
 	mutex_unlock(&ks->lock);
+	mii_check_link(&ks->mii);
 	return 0;
 }
 
@@ -889,6 +911,8 @@ static int ks8851_net_stop(struct net_device *dev)
 
 		dev_kfree_skb(txb);
 	}
+
+	free_irq(dev->irq, ks);
 
 	return 0;
 }
@@ -1499,6 +1523,7 @@ static int ks8851_probe(struct spi_device *spi)
 
 	spi_set_drvdata(spi, ks);
 
+	netif_carrier_off(ks->netdev);
 	ndev->if_port = IF_PORT_100BASET;
 	ndev->netdev_ops = &ks8851_netdev_ops;
 	ndev->irq = spi->irq;
@@ -1520,14 +1545,6 @@ static int ks8851_probe(struct spi_device *spi)
 	ks8851_read_selftest(ks);
 	ks8851_init_mac(ks);
 
-	ret = request_threaded_irq(spi->irq, NULL, ks8851_irq,
-				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
-				   ndev->name, ks);
-	if (ret < 0) {
-		dev_err(&spi->dev, "failed to get irq\n");
-		goto err_irq;
-	}
-
 	ret = register_netdev(ndev);
 	if (ret) {
 		dev_err(&spi->dev, "failed to register network device\n");
@@ -1540,14 +1557,10 @@ static int ks8851_probe(struct spi_device *spi)
 
 	return 0;
 
-
 err_netdev:
-	free_irq(ndev->irq, ks);
-
-err_irq:
+err_id:
 	if (gpio_is_valid(gpio))
 		gpio_set_value(gpio, 0);
-err_id:
 	regulator_disable(ks->vdd_reg);
 err_reg:
 	regulator_disable(ks->vdd_io);
@@ -1565,7 +1578,6 @@ static int ks8851_remove(struct spi_device *spi)
 		dev_info(&spi->dev, "remove\n");
 
 	unregister_netdev(priv->netdev);
-	free_irq(spi->irq, priv);
 	if (gpio_is_valid(priv->gpio))
 		gpio_set_value(priv->gpio, 0);
 	regulator_disable(priv->vdd_reg);

@@ -1,11 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2013 Imagination Technologies
  * Author: Paul Burton <paul.burton@mips.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/errno.h>
@@ -292,7 +288,6 @@ void mips_cm_lock_other(unsigned int cluster, unsigned int core,
 				  *this_cpu_ptr(&cm_core_lock_flags));
 	} else {
 		WARN_ON(cluster != 0);
-		WARN_ON(vp != 0);
 		WARN_ON(block != CM_GCR_Cx_OTHER_BLOCK_LOCAL);
 
 		/*
@@ -383,8 +378,8 @@ void mips_cm_error_report(void)
 				 sc_bit ? "True" : "False",
 				 cm2_cmd[cmd_bits], sport_bits);
 		}
-			pr_err("CM_ERROR=%08llx %s <%s>\n", cm_error,
-			       cm2_causes[cause], buf);
+		pr_err("CM_ERROR=%08llx %s <%s>\n", cm_error,
+		       cm2_causes[cause], buf);
 		pr_err("CM_ADDR =%08llx\n", cm_addr);
 		pr_err("CM_OTHER=%08llx %s\n", cm_other, cm2_causes[ocause]);
 	} else { /* CM3 */
@@ -458,5 +453,5 @@ void mips_cm_error_report(void)
 	}
 
 	/* reprime cause register */
-	write_gcr_error_cause(0);
+	write_gcr_error_cause(cm_error);
 }

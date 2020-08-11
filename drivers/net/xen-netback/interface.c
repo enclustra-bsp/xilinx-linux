@@ -148,24 +148,33 @@ void xenvif_wake_queue(struct xenvif_queue *queue)
 }
 
 static u16 xenvif_select_queue(struct net_device *dev, struct sk_buff *skb,
-			       void *accel_priv,
-			       select_queue_fallback_t fallback)
+			       struct net_device *sb_dev)
 {
 	struct xenvif *vif = netdev_priv(dev);
 	unsigned int size = vif->hash.size;
+	unsigned int num_queues;
+
+	/* If queues are not set up internally - always return 0
+	 * as the packet going to be dropped anyway */
+	num_queues = READ_ONCE(vif->num_queues);
+	if (num_queues < 1)
+		return 0;
 
 	if (vif->hash.alg == XEN_NETIF_CTRL_HASH_ALGORITHM_NONE)
-		return fallback(dev, skb) % dev->real_num_tx_queues;
+		return netdev_pick_tx(dev, skb, NULL) %
+		       dev->real_num_tx_queues;
 
 	xenvif_set_skb_hash(vif, skb);
 
 	if (size == 0)
 		return skb_get_hash_raw(skb) % dev->real_num_tx_queues;
 
-	return vif->hash.mapping[skb_get_hash_raw(skb) % size];
+	return vif->hash.mapping[vif->hash.mapping_sel]
+				[skb_get_hash_raw(skb) % size];
 }
 
-static int xenvif_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t
+xenvif_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct xenvif *vif = netdev_priv(dev);
 	struct xenvif_queue *queue = NULL;
@@ -186,7 +195,7 @@ static int xenvif_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* Obtain the queue to be used to transmit this packet */
 	index = skb_get_queue_mapping(skb);
 	if (index >= num_queues) {
-		pr_warn_ratelimited("Invalid queue %hu for packet on interface %s\n.",
+		pr_warn_ratelimited("Invalid queue %hu for packet on interface %s\n",
 				    index, vif->dev->name);
 		index %= num_queues;
 	}
@@ -520,8 +529,7 @@ int xenvif_init_queue(struct xenvif_queue *queue)
 
 	queue->credit_bytes = queue->remaining_credit = ~0UL;
 	queue->credit_usec  = 0UL;
-	init_timer(&queue->credit_timeout);
-	queue->credit_timeout.function = xenvif_tx_credit_callback;
+	timer_setup(&queue->credit_timeout, xenvif_tx_credit_callback, 0);
 	queue->credit_window_start = get_jiffies_64();
 
 	queue->rx_queue_max = XENVIF_RX_QUEUE_BYTES;
@@ -625,7 +633,7 @@ int xenvif_connect_data(struct xenvif_queue *queue,
 			unsigned int rx_evtchn)
 {
 	struct task_struct *task;
-	int err = -ENOMEM;
+	int err;
 
 	BUG_ON(queue->tx_irq);
 	BUG_ON(queue->task);
@@ -711,7 +719,6 @@ err_unmap:
 	xenvif_unmap_frontend_data_rings(queue);
 	netif_napi_del(&queue->napi);
 err:
-	module_put(THIS_MODULE);
 	return err;
 }
 

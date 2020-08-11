@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /**
  * The industrial I/O periodic hrtimer trigger driver
  *
@@ -6,11 +7,6 @@
  * Copyright (C) 2012, Analog Device Inc.
  *	Author: Lars-Peter Clausen <lars@metafoo.de>
  * Copyright (C) 2015, Intel Corporation
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
  */
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -30,7 +26,7 @@ struct iio_hrtimer_info {
 	ktime_t period;
 };
 
-static struct config_item_type iio_hrtimer_type = {
+static const struct config_item_type iio_hrtimer_type = {
 	.ct_owner = THIS_MODULE,
 };
 
@@ -114,7 +110,6 @@ static int iio_trig_hrtimer_set_state(struct iio_trigger *trig, bool state)
 }
 
 static const struct iio_trigger_ops iio_hrtimer_trigger_ops = {
-	.owner = THIS_MODULE,
 	.set_trigger_state = iio_trig_hrtimer_set_state,
 };
 

@@ -30,8 +30,6 @@
  * SOFTWARE.
  */
 
-#ifdef CONFIG_SECURITY_INFINIBAND
-
 #include <linux/security.h>
 #include <linux/completion.h>
 #include <linux/list.h>
@@ -41,22 +39,25 @@
 #include "core_priv.h"
 #include "mad_priv.h"
 
+static LIST_HEAD(mad_agent_list);
+/* Lock to protect mad_agent_list */
+static DEFINE_SPINLOCK(mad_agent_list_lock);
+
 static struct pkey_index_qp_list *get_pkey_idx_qp_list(struct ib_port_pkey *pp)
 {
 	struct pkey_index_qp_list *pkey = NULL;
 	struct pkey_index_qp_list *tmp_pkey;
 	struct ib_device *dev = pp->sec->dev;
 
-	spin_lock(&dev->port_pkey_list[pp->port_num].list_lock);
-	list_for_each_entry(tmp_pkey,
-			    &dev->port_pkey_list[pp->port_num].pkey_list,
-			    pkey_index_list) {
+	spin_lock(&dev->port_data[pp->port_num].pkey_list_lock);
+	list_for_each_entry (tmp_pkey, &dev->port_data[pp->port_num].pkey_list,
+			     pkey_index_list) {
 		if (tmp_pkey->pkey_index == pp->pkey_index) {
 			pkey = tmp_pkey;
 			break;
 		}
 	}
-	spin_unlock(&dev->port_pkey_list[pp->port_num].list_lock);
+	spin_unlock(&dev->port_data[pp->port_num].pkey_list_lock);
 	return pkey;
 }
 
@@ -87,16 +88,14 @@ static int enforce_qp_pkey_security(u16 pkey,
 	if (ret)
 		return ret;
 
-	if (qp_sec->qp == qp_sec->qp->real_qp) {
-		list_for_each_entry(shared_qp_sec,
-				    &qp_sec->shared_qp_list,
-				    shared_qp_list) {
-			ret = security_ib_pkey_access(shared_qp_sec->security,
-						      subnet_prefix,
-						      pkey);
-			if (ret)
-				return ret;
-		}
+	list_for_each_entry(shared_qp_sec,
+			    &qp_sec->shared_qp_list,
+			    shared_qp_list) {
+		ret = security_ib_pkey_access(shared_qp_sec->security,
+					      subnet_prefix,
+					      pkey);
+		if (ret)
+			return ret;
 	}
 	return 0;
 }
@@ -263,12 +262,12 @@ static int port_pkey_list_insert(struct ib_port_pkey *pp)
 		if (!pkey)
 			return -ENOMEM;
 
-		spin_lock(&dev->port_pkey_list[port_num].list_lock);
+		spin_lock(&dev->port_data[port_num].pkey_list_lock);
 		/* Check for the PKey again.  A racing process may
 		 * have created it.
 		 */
 		list_for_each_entry(tmp_pkey,
-				    &dev->port_pkey_list[port_num].pkey_list,
+				    &dev->port_data[port_num].pkey_list,
 				    pkey_index_list) {
 			if (tmp_pkey->pkey_index == pp->pkey_index) {
 				kfree(pkey);
@@ -283,9 +282,9 @@ static int port_pkey_list_insert(struct ib_port_pkey *pp)
 			spin_lock_init(&pkey->qp_list_lock);
 			INIT_LIST_HEAD(&pkey->qp_list);
 			list_add(&pkey->pkey_index_list,
-				 &dev->port_pkey_list[port_num].pkey_list);
+				 &dev->port_data[port_num].pkey_list);
 		}
-		spin_unlock(&dev->port_pkey_list[port_num].list_lock);
+		spin_unlock(&dev->port_data[port_num].pkey_list_lock);
 	}
 
 	spin_lock(&pkey->qp_list_lock);
@@ -388,6 +387,9 @@ int ib_open_shared_qp_security(struct ib_qp *qp, struct ib_device *dev)
 	if (ret)
 		return ret;
 
+	if (!qp->qp_sec)
+		return 0;
+
 	mutex_lock(&real_qp->qp_sec->mutex);
 	ret = check_qp_port_pkey_settings(real_qp->qp_sec->ports_pkeys,
 					  qp->qp_sec);
@@ -419,7 +421,19 @@ void ib_close_shared_qp_security(struct ib_qp_security *sec)
 
 int ib_create_qp_security(struct ib_qp *qp, struct ib_device *dev)
 {
+	unsigned int i;
+	bool is_ib = false;
 	int ret;
+
+	rdma_for_each_port (dev, i) {
+		is_ib = rdma_protocol_ib(dev, i);
+		if (is_ib)
+			break;
+	}
+
+	/* If this isn't an IB device don't create the security context */
+	if (!is_ib)
+		return 0;
 
 	qp->qp_sec = kzalloc(sizeof(*qp->qp_sec), GFP_KERNEL);
 	if (!qp->qp_sec)
@@ -443,6 +457,10 @@ EXPORT_SYMBOL(ib_create_qp_security);
 
 void ib_destroy_qp_security_begin(struct ib_qp_security *sec)
 {
+	/* Return if not IB */
+	if (!sec)
+		return;
+
 	mutex_lock(&sec->mutex);
 
 	/* Remove the QP from the lists so it won't get added to
@@ -471,6 +489,10 @@ void ib_destroy_qp_security_abort(struct ib_qp_security *sec)
 {
 	int ret;
 	int i;
+
+	/* Return if not IB */
+	if (!sec)
+		return;
 
 	/* If a concurrent cache update is in progress this
 	 * QP security could be marked for an error state
@@ -507,6 +529,10 @@ void ib_destroy_qp_security_end(struct ib_qp_security *sec)
 {
 	int i;
 
+	/* Return if not IB */
+	if (!sec)
+		return;
+
 	/* If a concurrent cache update is occurring we must
 	 * wait until this QP security structure is processed
 	 * in the QP to error flow before destroying it because
@@ -524,9 +550,8 @@ void ib_security_cache_change(struct ib_device *device,
 {
 	struct pkey_index_qp_list *pkey;
 
-	list_for_each_entry(pkey,
-			    &device->port_pkey_list[port_num].pkey_list,
-			    pkey_index_list) {
+	list_for_each_entry (pkey, &device->port_data[port_num].pkey_list,
+			     pkey_index_list) {
 		check_pkey_qps(pkey,
 			       device,
 			       port_num,
@@ -534,21 +559,19 @@ void ib_security_cache_change(struct ib_device *device,
 	}
 }
 
-void ib_security_destroy_port_pkey_list(struct ib_device *device)
+void ib_security_release_port_pkey_list(struct ib_device *device)
 {
 	struct pkey_index_qp_list *pkey, *tmp_pkey;
-	int i;
+	unsigned int i;
 
-	for (i = rdma_start_port(device); i <= rdma_end_port(device); i++) {
-		spin_lock(&device->port_pkey_list[i].list_lock);
+	rdma_for_each_port (device, i) {
 		list_for_each_entry_safe(pkey,
 					 tmp_pkey,
-					 &device->port_pkey_list[i].pkey_list,
+					 &device->port_data[i].pkey_list,
 					 pkey_index_list) {
 			list_del(&pkey->pkey_index_list);
 			kfree(pkey);
 		}
-		spin_unlock(&device->port_pkey_list[i].list_lock);
 	}
 }
 
@@ -559,19 +582,35 @@ int ib_security_modify_qp(struct ib_qp *qp,
 {
 	int ret = 0;
 	struct ib_ports_pkeys *tmp_pps;
-	struct ib_ports_pkeys *new_pps;
-	bool special_qp = (qp->qp_type == IB_QPT_SMI ||
-			   qp->qp_type == IB_QPT_GSI ||
-			   qp->qp_type >= IB_QPT_RESERVED1);
+	struct ib_ports_pkeys *new_pps = NULL;
+	struct ib_qp *real_qp = qp->real_qp;
+	bool special_qp = (real_qp->qp_type == IB_QPT_SMI ||
+			   real_qp->qp_type == IB_QPT_GSI ||
+			   real_qp->qp_type >= IB_QPT_RESERVED1);
 	bool pps_change = ((qp_attr_mask & (IB_QP_PKEY_INDEX | IB_QP_PORT)) ||
 			   (qp_attr_mask & IB_QP_ALT_PATH));
 
-	if (pps_change && !special_qp) {
-		mutex_lock(&qp->qp_sec->mutex);
-		new_pps = get_new_pps(qp,
+	WARN_ONCE((qp_attr_mask & IB_QP_PORT &&
+		   rdma_protocol_ib(real_qp->device, qp_attr->port_num) &&
+		   !real_qp->qp_sec),
+		   "%s: QP security is not initialized for IB QP: %d\n",
+		   __func__, real_qp->qp_num);
+
+	/* The port/pkey settings are maintained only for the real QP. Open
+	 * handles on the real QP will be in the shared_qp_list. When
+	 * enforcing security on the real QP all the shared QPs will be
+	 * checked as well.
+	 */
+
+	if (pps_change && !special_qp && real_qp->qp_sec) {
+		mutex_lock(&real_qp->qp_sec->mutex);
+		new_pps = get_new_pps(real_qp,
 				      qp_attr,
 				      qp_attr_mask);
-
+		if (!new_pps) {
+			mutex_unlock(&real_qp->qp_sec->mutex);
+			return -ENOMEM;
+		}
 		/* Add this QP to the lists for the new port
 		 * and pkey settings before checking for permission
 		 * in case there is a concurrent cache update
@@ -586,24 +625,24 @@ int ib_security_modify_qp(struct ib_qp *qp,
 
 		if (!ret)
 			ret = check_qp_port_pkey_settings(new_pps,
-							  qp->qp_sec);
+							  real_qp->qp_sec);
 	}
 
 	if (!ret)
-		ret = qp->device->modify_qp(qp->real_qp,
-					    qp_attr,
-					    qp_attr_mask,
-					    udata);
+		ret = real_qp->device->ops.modify_qp(real_qp,
+						     qp_attr,
+						     qp_attr_mask,
+						     udata);
 
-	if (pps_change && !special_qp) {
+	if (new_pps) {
 		/* Clean up the lists and free the appropriate
 		 * ports_pkeys structure.
 		 */
 		if (ret) {
 			tmp_pps = new_pps;
 		} else {
-			tmp_pps = qp->qp_sec->ports_pkeys;
-			qp->qp_sec->ports_pkeys = new_pps;
+			tmp_pps = real_qp->qp_sec->ports_pkeys;
+			real_qp->qp_sec->ports_pkeys = new_pps;
 		}
 
 		if (tmp_pps) {
@@ -611,20 +650,22 @@ int ib_security_modify_qp(struct ib_qp *qp,
 			port_pkey_list_remove(&tmp_pps->alt);
 		}
 		kfree(tmp_pps);
-		mutex_unlock(&qp->qp_sec->mutex);
+		mutex_unlock(&real_qp->qp_sec->mutex);
 	}
 	return ret;
 }
-EXPORT_SYMBOL(ib_security_modify_qp);
 
-int ib_security_pkey_access(struct ib_device *dev,
-			    u8 port_num,
-			    u16 pkey_index,
-			    void *sec)
+static int ib_security_pkey_access(struct ib_device *dev,
+				   u8 port_num,
+				   u16 pkey_index,
+				   void *sec)
 {
 	u64 subnet_prefix;
 	u16 pkey;
 	int ret;
+
+	if (!rdma_protocol_ib(dev, port_num))
+		return 0;
 
 	ret = ib_get_cached_pkey(dev, port_num, pkey_index, &pkey);
 	if (ret)
@@ -637,28 +678,30 @@ int ib_security_pkey_access(struct ib_device *dev,
 
 	return security_ib_pkey_access(sec, subnet_prefix, pkey);
 }
-EXPORT_SYMBOL(ib_security_pkey_access);
 
-static int ib_mad_agent_security_change(struct notifier_block *nb,
-					unsigned long event,
-					void *data)
+void ib_mad_agent_security_change(void)
 {
-	struct ib_mad_agent *ag = container_of(nb, struct ib_mad_agent, lsm_nb);
+	struct ib_mad_agent *ag;
 
-	if (event != LSM_POLICY_CHANGE)
-		return NOTIFY_DONE;
-
-	ag->smp_allowed = !security_ib_endport_manage_subnet(ag->security,
-							     ag->device->name,
-							     ag->port_num);
-
-	return NOTIFY_OK;
+	spin_lock(&mad_agent_list_lock);
+	list_for_each_entry(ag,
+			    &mad_agent_list,
+			    mad_agent_sec_list)
+		WRITE_ONCE(ag->smp_allowed,
+			   !security_ib_endport_manage_subnet(ag->security,
+				dev_name(&ag->device->dev), ag->port_num));
+	spin_unlock(&mad_agent_list_lock);
 }
 
 int ib_mad_agent_security_setup(struct ib_mad_agent *agent,
 				enum ib_qp_type qp_type)
 {
 	int ret;
+
+	if (!rdma_protocol_ib(agent->device, agent->port_num))
+		return 0;
+
+	INIT_LIST_HEAD(&agent->mad_agent_sec_list);
 
 	ret = security_ib_alloc_security(&agent->security);
 	if (ret)
@@ -667,45 +710,51 @@ int ib_mad_agent_security_setup(struct ib_mad_agent *agent,
 	if (qp_type != IB_QPT_SMI)
 		return 0;
 
+	spin_lock(&mad_agent_list_lock);
 	ret = security_ib_endport_manage_subnet(agent->security,
-						agent->device->name,
+						dev_name(&agent->device->dev),
 						agent->port_num);
 	if (ret)
-		return ret;
+		goto free_security;
 
-	agent->lsm_nb.notifier_call = ib_mad_agent_security_change;
-	ret = register_lsm_notifier(&agent->lsm_nb);
-	if (ret)
-		return ret;
-
-	agent->smp_allowed = true;
-	agent->lsm_nb_reg = true;
+	WRITE_ONCE(agent->smp_allowed, true);
+	list_add(&agent->mad_agent_sec_list, &mad_agent_list);
+	spin_unlock(&mad_agent_list_lock);
 	return 0;
+
+free_security:
+	spin_unlock(&mad_agent_list_lock);
+	security_ib_free_security(agent->security);
+	return ret;
 }
 
 void ib_mad_agent_security_cleanup(struct ib_mad_agent *agent)
 {
+	if (!rdma_protocol_ib(agent->device, agent->port_num))
+		return;
+
+	if (agent->qp->qp_type == IB_QPT_SMI) {
+		spin_lock(&mad_agent_list_lock);
+		list_del(&agent->mad_agent_sec_list);
+		spin_unlock(&mad_agent_list_lock);
+	}
+
 	security_ib_free_security(agent->security);
-	if (agent->lsm_nb_reg)
-		unregister_lsm_notifier(&agent->lsm_nb);
 }
 
 int ib_mad_enforce_security(struct ib_mad_agent_private *map, u16 pkey_index)
 {
-	int ret;
+	if (!rdma_protocol_ib(map->agent.device, map->agent.port_num))
+		return 0;
 
-	if (map->agent.qp->qp_type == IB_QPT_SMI && !map->agent.smp_allowed)
-		return -EACCES;
+	if (map->agent.qp->qp_type == IB_QPT_SMI) {
+		if (!READ_ONCE(map->agent.smp_allowed))
+			return -EACCES;
+		return 0;
+	}
 
-	ret = ib_security_pkey_access(map->agent.device,
-				      map->agent.port_num,
-				      pkey_index,
-				      map->agent.security);
-
-	if (ret)
-		return ret;
-
-	return 0;
+	return ib_security_pkey_access(map->agent.device,
+				       map->agent.port_num,
+				       pkey_index,
+				       map->agent.security);
 }
-
-#endif /* CONFIG_SECURITY_INFINIBAND */

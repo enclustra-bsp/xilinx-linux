@@ -202,4 +202,34 @@
 #define V4L2_CID_XILINX_SDIRX_ACTIVE_STREAMS	(V4L2_CID_XILINX_SDIRX + 10)
 /* Is Mode 3GB */
 #define V4L2_CID_XILINX_SDIRX_IS_3GB		(V4L2_CID_XILINX_SDIRX + 11)
+
+/*
+ * Xilinx VIP
+ */
+
+/* Base ID */
+#define V4L2_CID_XILINX_VIP			(V4L2_CID_USER_BASE + 0xc120)
+
+/* Low latency mode */
+#define V4L2_CID_XILINX_LOW_LATENCY		(V4L2_CID_XILINX_VIP + 1)
+
+/* Control values to enable/disable low latency capture mode */
+#define XVIP_LOW_LATENCY_ENABLE		BIT(1)
+#define XVIP_LOW_LATENCY_DISABLE	BIT(2)
+
+/* Control value to start DMA */
+#define XVIP_START_DMA			BIT(3)
+
+/*
+ * Xilinx SCD
+ */
+
+/* Base ID */
+#define V4L2_CID_XILINX_SCD			(V4L2_CID_USER_BASE + 0xc140)
+
+/*
+ * SCD Threshold
+ * User can pass percentage as an integer to tune threshold value
+ */
+#define V4L2_CID_XILINX_SCD_THRESHOLD		(V4L2_CID_XILINX_SCD + 1)
 #endif /* __UAPI_XILINX_V4L2_CONTROLS_H__ */

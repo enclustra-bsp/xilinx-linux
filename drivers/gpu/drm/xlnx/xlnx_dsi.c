@@ -16,8 +16,11 @@
 #include <drm/drm_gem_cma_helper.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_panel.h>
+#include <drm/drm_probe_helper.h>
+#include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/device.h>
+#include <linux/iopoll.h>
 #include <linux/of_device.h>
 #include <linux/of_graph.h>
 #include <linux/phy/phy.h>
@@ -29,7 +32,11 @@
 /* DSI Tx IP registers */
 #define XDSI_CCR			0x00
 #define XDSI_CCR_COREENB		BIT(0)
+#define XDSI_CCR_SOFTRST		BIT(1)
 #define XDSI_CCR_CRREADY		BIT(2)
+#define XDSI_CCR_CMDMODE		BIT(3)
+#define XDSI_CCR_DFIFORST		BIT(4)
+#define XDSI_CCR_CMDFIFORST		BIT(5)
 #define XDSI_PCR			0x04
 #define XDSI_PCR_VIDEOMODE(x)		(((x) & 0x3) << 3)
 #define XDSI_PCR_VIDEOMODE_MASK		(0x3 << 3)
@@ -40,8 +47,18 @@
 #define XDSI_GIER			0x20
 #define XDSI_ISR			0x24
 #define XDSI_IER			0x28
+#define XDSI_STR			0x2C
+#define XDSI_STR_RDY_SHPKT		BIT(6)
+#define XDSI_STR_RDY_LNGPKT		BIT(7)
+#define XDSI_STR_DFIFO_FULL		BIT(8)
+#define XDSI_STR_DFIFO_EMPTY		BIT(9)
+#define XDSI_STR_WAITFR_DATA		BIT(10)
+#define XDSI_STR_CMD_EXE_PGS		BIT(11)
+#define XDSI_STR_CCMD_PROC		BIT(12)
+#define XDSI_STR_LPKT_MASK		(0x5 << 7)
 #define XDSI_CMD			0x30
 #define XDSI_CMD_QUEUE_PACKET(x)	((x) & GENMASK(23, 0))
+#define XDSI_DFR			0x34
 #define XDSI_TIME1			0x50
 #define XDSI_TIME1_BLLP_BURST(x)	((x) & GENMASK(15, 0))
 #define XDSI_TIME1_HSA(x)		(((x) & GENMASK(15, 0)) << 16)
@@ -67,6 +84,13 @@
 #define XDSI_VIDEO_MODE_SYNC_EVENT	0x1
 #define XDSI_VIDEO_MODE_BURST		0x2
 
+#define XDSI_DPHY_CLK_MIN	197000000000UL
+#define XDSI_DPHY_CLK_MAX	203000000000UL
+#define XDSI_DPHY_CLK_REQ	200000000000UL
+
+/* command timeout in usec */
+#define XDSI_CMD_TIMEOUT_VAL	(3000)
+
 /**
  * struct xlnx_dsi - Core configuration DSI Tx subsystem device structure
  * @encoder: DRM encoder structure
@@ -77,6 +101,7 @@
  * @dev: device structure
  * @iomem: Base address of DSI subsystem
  * @lanes: number of active data lanes supported by DSI controller
+ * @cmdmode: command mode support
  * @mode_flags: DSI operation mode related flags
  * @format: pixel format for video mode of DSI controller
  * @vm: videomode data structure
@@ -102,6 +127,8 @@
  * @in_fmt_prop_val: configurable media bus format value
  * @out_fmt: configurable bridge output media format
  * @out_fmt_prop_val: configurable media bus format value
+ * @video_aclk: Video clock
+ * @dphy_clk_200M: 200MHz DPHY clock and AXI Lite clock
  */
 struct xlnx_dsi {
 	struct drm_encoder encoder;
@@ -112,6 +139,7 @@ struct xlnx_dsi {
 	struct device *dev;
 	void __iomem *iomem;
 	u32 lanes;
+	bool cmdmode;
 	u32 mode_flags;
 	enum mipi_dsi_pixel_format format;
 	struct videomode vm;
@@ -137,6 +165,8 @@ struct xlnx_dsi {
 	u32 in_fmt_prop_val;
 	struct drm_property *out_fmt;
 	u32 out_fmt_prop_val;
+	struct clk *video_aclk;
+	struct clk *dphy_clk_200M;
 };
 
 #define host_to_dsi(host) container_of(host, struct xlnx_dsi, dsi_host)
@@ -365,6 +395,77 @@ xlnx_dsi_atomic_get_property(struct drm_connector *connector,
 	return 0;
 }
 
+/**
+ * xlnx_dsi_host_transfer - transfer command to panel
+ * @host: mipi dsi host structure
+ * @msg: mipi dsi msg with type, length and data
+ *
+ * This function is valid only in command mode.
+ * It checks the command fifo empty status and writes into
+ * data or cmd register and waits for the completion status.
+ *
+ * Return:	number of bytes, on success and error number on failure
+ */
+static ssize_t xlnx_dsi_host_transfer(struct mipi_dsi_host *host,
+				      const struct mipi_dsi_msg *msg)
+{
+	struct xlnx_dsi *dsi = host_to_dsi(host);
+	u32 data0, data1, cmd0, status, val;
+	const char *tx_buf = msg->tx_buf;
+
+	if (!(xlnx_dsi_readl(dsi->iomem, XDSI_CCR) & (XDSI_CCR_COREENB |
+						      XDSI_CCR_CMDMODE))) {
+		dev_err(dsi->dev, "dsi command mode not enabled\n");
+		return -EINVAL;
+	}
+
+	if (msg->type == MIPI_DSI_DCS_LONG_WRITE) {
+		status = readl_poll_timeout(dsi->iomem + XDSI_STR, val,
+					    ((val & XDSI_STR_LPKT_MASK) ==
+					     XDSI_STR_LPKT_MASK), 1,
+					    XDSI_CMD_TIMEOUT_VAL);
+		if (status) {
+			dev_err(dsi->dev, "long cmd fifo not empty!\n");
+			return -ETIMEDOUT;
+		}
+		data0 = tx_buf[0] | (tx_buf[1] << 8) | (tx_buf[2] << 16) |
+			(tx_buf[3] << 24);
+		data1 = tx_buf[4] | (tx_buf[5] << 8);
+		cmd0 = msg->type | (MIPI_DSI_DCS_READ << 8);
+
+		xlnx_dsi_writel(dsi->iomem, XDSI_DFR, data0);
+		xlnx_dsi_writel(dsi->iomem, XDSI_DFR, data1);
+		xlnx_dsi_writel(dsi->iomem, XDSI_CMD, cmd0);
+	} else {
+		data0 = tx_buf[0];
+		if (msg->type == MIPI_DSI_DCS_SHORT_WRITE_PARAM)
+			data0 = MIPI_DSI_DCS_SHORT_WRITE_PARAM |
+				(tx_buf[0] << 8) | (tx_buf[1] << 16);
+		else
+			data0 = MIPI_DSI_DCS_SHORT_WRITE | (tx_buf[0] << 8);
+
+		status = readl_poll_timeout(dsi->iomem + XDSI_STR, val,
+					    ((val & XDSI_STR_RDY_SHPKT) ==
+					     XDSI_STR_RDY_SHPKT), 1,
+					    XDSI_CMD_TIMEOUT_VAL);
+		if (status) {
+			dev_err(dsi->dev, "short cmd fifo not empty\n");
+			return -ETIMEDOUT;
+		}
+		xlnx_dsi_writel(dsi->iomem, XDSI_CMD, data0);
+	}
+
+	status = readl_poll_timeout(dsi->iomem + XDSI_STR, val,
+				    (!(val & XDSI_STR_CMD_EXE_PGS)), 1,
+				    XDSI_CMD_TIMEOUT_VAL);
+	if (status) {
+		dev_err(dsi->dev, "cmd time out\n");
+		return -ETIMEDOUT;
+	}
+
+	return msg->tx_len;
+}
+
 static int xlnx_dsi_host_attach(struct mipi_dsi_host *host,
 				struct mipi_dsi_device *device)
 {
@@ -415,6 +516,7 @@ static int xlnx_dsi_host_detach(struct mipi_dsi_host *host,
 static const struct mipi_dsi_host_ops xlnx_dsi_ops = {
 	.attach = xlnx_dsi_host_attach,
 	.detach = xlnx_dsi_host_detach,
+	.transfer = xlnx_dsi_host_transfer,
 };
 
 static int xlnx_dsi_connector_dpms(struct drm_connector *connector, int mode)
@@ -455,8 +557,16 @@ xlnx_dsi_detect(struct drm_connector *connector, bool force)
 
 	if (!dsi->panel) {
 		dsi->panel = of_drm_find_panel(dsi->panel_node);
-		if (dsi->panel)
+		if (dsi->panel) {
 			drm_panel_attach(dsi->panel, &dsi->connector);
+			if (dsi->cmdmode) {
+				xlnx_dsi_writel(dsi->iomem, XDSI_CCR,
+						XDSI_CCR_CMDMODE |
+						XDSI_CCR_COREENB);
+				drm_panel_prepare(dsi->panel);
+				xlnx_dsi_writel(dsi->iomem, XDSI_CCR, 0);
+			}
+		}
 	} else if (!dsi->panel_node) {
 		xlnx_dsi_connector_dpms(connector, DRM_MODE_DPMS_OFF);
 		drm_panel_detach(dsi->panel);
@@ -522,7 +632,7 @@ static void xlnx_dsi_connector_create_property(struct drm_connector *connector)
 	struct drm_device *dev = connector->dev;
 	struct xlnx_dsi *dsi  = connector_to_dsi(connector);
 
-	dsi->eotp_prop = drm_property_create_bool(dev, 1, "eotp");
+	dsi->eotp_prop = drm_property_create_bool(dev, 0, "eotp");
 	dsi->video_mode_prop = drm_property_create_range(dev, 0, "video_mode",
 							 0, 2);
 	dsi->bllp_mode_prop = drm_property_create_bool(dev, 0, "bllp_mode");
@@ -603,7 +713,7 @@ static int xlnx_dsi_create_connector(struct drm_encoder *encoder)
 
 	drm_connector_helper_add(connector, &xlnx_dsi_connector_helper_funcs);
 	drm_connector_register(connector);
-	drm_mode_connector_attach_encoder(connector, encoder);
+	drm_connector_attach_encoder(connector, encoder);
 	xlnx_dsi_connector_create_property(connector);
 	xlnx_dsi_connector_attach_property(connector);
 
@@ -682,6 +792,21 @@ static int xlnx_dsi_parse_dt(struct xlnx_dsi *dsi)
 	int ret;
 	u32 datatype;
 	static const int xdsi_mul_fact[XDSI_NUM_DATA_T] = {300, 225, 225, 200};
+
+	dsi->dphy_clk_200M = devm_clk_get(dev, "dphy_clk_200M");
+	if (IS_ERR(dsi->dphy_clk_200M)) {
+		ret = PTR_ERR(dsi->dphy_clk_200M);
+		dev_err(dev, "failed to get dphy_clk_200M %d\n", ret);
+		return ret;
+	}
+
+	dsi->video_aclk = devm_clk_get(dev, "s_axis_aclk");
+	if (IS_ERR(dsi->video_aclk)) {
+		ret = PTR_ERR(dsi->video_aclk);
+		dev_err(dev, "failed to get video_clk %d\n", ret);
+		return ret;
+	}
+
 	/*
 	 * Used as a multiplication factor for HACT based on used
 	 * DSI data type.
@@ -720,8 +845,12 @@ static int xlnx_dsi_parse_dt(struct xlnx_dsi *dsi)
 		return -EINVAL;
 	}
 	dsi->mul_factor = xdsi_mul_fact[datatype];
+
+	dsi->cmdmode = of_property_read_bool(node, "xlnx,dsi-cmd-mode");
+
 	dev_dbg(dsi->dev, "DSI controller num lanes = %d", dsi->lanes);
 	dev_dbg(dsi->dev, "DSI controller datatype = %d\n", datatype);
+	dev_dbg(dsi->dev, "DSI controller cmd mode = %d\n", dsi->cmdmode);
 
 	return 0;
 }
@@ -780,6 +909,7 @@ static int xlnx_dsi_probe(struct platform_device *pdev)
 	struct xlnx_dsi *dsi;
 	struct device_node *vpss_node;
 	int ret;
+	unsigned long rate;
 
 	dsi = devm_kzalloc(dev, sizeof(*dsi), GFP_KERNEL);
 	if (!dsi)
@@ -810,12 +940,51 @@ static int xlnx_dsi_probe(struct platform_device *pdev)
 		}
 	}
 
-	return component_add(dev, &xlnx_dsi_component_ops);
+	ret = clk_set_rate(dsi->dphy_clk_200M, XDSI_DPHY_CLK_REQ);
+	if (ret) {
+		dev_err(dev, "failed to set dphy clk rate %d\n", ret);
+		return ret;
+	}
+
+	ret = clk_prepare_enable(dsi->dphy_clk_200M);
+	if (ret) {
+		dev_err(dev, "failed to enable dphy clk %d\n", ret);
+		return ret;
+	}
+
+	rate = clk_get_rate(dsi->dphy_clk_200M);
+	if (rate < XDSI_DPHY_CLK_MIN && rate > XDSI_DPHY_CLK_MAX) {
+		dev_err(dev, "Error DPHY clock = %lu\n", rate);
+		ret = -EINVAL;
+		goto err_disable_dphy_clk;
+	}
+
+	ret = clk_prepare_enable(dsi->video_aclk);
+	if (ret) {
+		dev_err(dev, "failed to enable video clk %d\n", ret);
+		goto err_disable_dphy_clk;
+	}
+
+	ret = component_add(dev, &xlnx_dsi_component_ops);
+	if (ret < 0)
+		goto err_disable_video_clk;
+
+	return ret;
+
+err_disable_video_clk:
+	clk_disable_unprepare(dsi->video_aclk);
+err_disable_dphy_clk:
+	clk_disable_unprepare(dsi->dphy_clk_200M);
+	return ret;
 }
 
 static int xlnx_dsi_remove(struct platform_device *pdev)
 {
+	struct xlnx_dsi *dsi = platform_get_drvdata(pdev);
+
 	component_del(&pdev->dev, &xlnx_dsi_component_ops);
+	clk_disable_unprepare(dsi->video_aclk);
+	clk_disable_unprepare(dsi->dphy_clk_200M);
 
 	return 0;
 }

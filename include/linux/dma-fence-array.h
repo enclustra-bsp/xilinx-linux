@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * fence-array: aggregates fence to be waited together
  *
@@ -6,21 +7,13 @@
  * Authors:
  *	Gustavo Padovan <gustavo@padovan.org>
  *	Christian König <christian.koenig@amd.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef __LINUX_DMA_FENCE_ARRAY_H
 #define __LINUX_DMA_FENCE_ARRAY_H
 
 #include <linux/dma-fence.h>
+#include <linux/irq_work.h>
 
 /**
  * struct dma_fence_array_cb - callback helper for fence array
@@ -39,6 +32,7 @@ struct dma_fence_array_cb {
  * @num_fences: number of fences in the array
  * @num_pending: fences in the array still pending
  * @fences: array of the fences
+ * @work: internal irq_work function
  */
 struct dma_fence_array {
 	struct dma_fence base;
@@ -47,6 +41,8 @@ struct dma_fence_array {
 	unsigned num_fences;
 	atomic_t num_pending;
 	struct dma_fence **fences;
+
+	struct irq_work work;
 };
 
 extern const struct dma_fence_ops dma_fence_array_ops;

@@ -1,14 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2014 - 2017 Jes Sorensen <Jes.Sorensen@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
- * more details.
  *
  * Register definitions taken from original Realtek rtl8723au driver
  */
@@ -1172,7 +1164,7 @@ struct rtl8723bu_c2h {
 
 			u8 basic_rate:1;
 			u8 bt_has_reset:1;
-			u8 dummy4_1:1;;
+			u8 dummy4_1:1;
 			u8 ignore_wlan:1;
 			u8 auto_report:1;
 			u8 dummy4_2:3;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2017 Tony Lindgren <tony@atomide.com>
  *
@@ -5,15 +6,6 @@
  * earlier driver found in the Motorola Linux kernel:
  *
  * Copyright (C) 2009-2010 Motorola, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
  */
 
 #include <linux/delay.h>
@@ -932,7 +924,6 @@ err_unlock:
 
 static const struct iio_info cpcap_adc_info = {
 	.read_raw = &cpcap_adc_read,
-	.driver_module = THIS_MODULE,
 };
 
 /*
@@ -1012,7 +1003,7 @@ static int cpcap_adc_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, indio_dev);
 
 	ddata->irq = platform_get_irq_byname(pdev, "adcdone");
-	if (!ddata->irq)
+	if (ddata->irq < 0)
 		return -ENODEV;
 
 	error = devm_request_threaded_irq(&pdev->dev, ddata->irq, NULL,

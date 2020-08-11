@@ -25,10 +25,11 @@
  *          Alex Deucher
  *          Jerome Glisse
  */
-#include <drm/drmP.h>
+
 #include "amdgpu.h"
 #include "atom.h"
 
+#include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/acpi.h>
 /*
@@ -56,12 +57,6 @@ static bool check_atom_bios(uint8_t *bios, size_t size)
 
 	if (!AMD_IS_VALID_VBIOS(bios)) {
 		DRM_INFO("BIOS signature incorrect %x %x\n", bios[0], bios[1]);
-		return false;
-	}
-
-	tmp = bios[0x18] | (bios[0x19] << 8);
-	if (bios[tmp + 0x14] != 0x0) {
-		DRM_INFO("Not an x86 BIOS ROM\n");
 		return false;
 	}
 
@@ -99,7 +94,7 @@ static bool igp_read_bios_from_vram(struct amdgpu_device *adev)
 	resource_size_t size = 256 * 1024; /* ??? */
 
 	if (!(adev->flags & AMD_IS_APU))
-		if (amdgpu_need_post(adev))
+		if (amdgpu_device_need_post(adev))
 			return false;
 
 	adev->bios = NULL;

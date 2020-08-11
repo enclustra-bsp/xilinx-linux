@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
 /* Applied Micro X-Gene SoC MDIO Driver
  *
  * Copyright (c) 2016, Applied Micro Circuits Corporation
  * Author: Iyappan Subramanian <isubramanian@apm.com>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/acpi.h>
@@ -194,8 +182,11 @@ static int xgene_mdio_reset(struct xgene_mdio_pdata *pdata)
 	}
 
 	ret = xgene_enet_ecc_init(pdata);
-	if (ret)
+	if (ret) {
+		if (pdata->dev->of_node)
+			clk_disable_unprepare(pdata->clk);
 		return ret;
+	}
 	xgene_gmac_reset(pdata);
 
 	return 0;
@@ -337,7 +328,6 @@ static int xgene_mdio_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct mii_bus *mdio_bus;
 	const struct of_device_id *of_id;
-	struct resource *res;
 	struct xgene_mdio_pdata *pdata;
 	void __iomem *csr_base;
 	int mdio_id = 0, ret = 0;
@@ -364,8 +354,7 @@ static int xgene_mdio_probe(struct platform_device *pdev)
 	pdata->mdio_id = mdio_id;
 	pdata->dev = dev;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	csr_base = devm_ioremap_resource(dev, res);
+	csr_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(csr_base))
 		return PTR_ERR(csr_base);
 	pdata->mac_csr_addr = csr_base;
@@ -388,8 +377,10 @@ static int xgene_mdio_probe(struct platform_device *pdev)
 		return ret;
 
 	mdio_bus = mdiobus_alloc();
-	if (!mdio_bus)
-		return -ENOMEM;
+	if (!mdio_bus) {
+		ret = -ENOMEM;
+		goto out_clk;
+	}
 
 	mdio_bus->name = "APM X-Gene MDIO bus";
 
@@ -418,7 +409,7 @@ static int xgene_mdio_probe(struct platform_device *pdev)
 		mdio_bus->phy_mask = ~0;
 		ret = mdiobus_register(mdio_bus);
 		if (ret)
-			goto out;
+			goto out_mdiobus;
 
 		acpi_walk_namespace(ACPI_TYPE_DEVICE, ACPI_HANDLE(dev), 1,
 				    acpi_register_phy, NULL, mdio_bus, NULL);
@@ -426,15 +417,19 @@ static int xgene_mdio_probe(struct platform_device *pdev)
 	}
 
 	if (ret)
-		goto out;
+		goto out_mdiobus;
 
 	pdata->mdio_bus = mdio_bus;
 	xgene_mdio_status = true;
 
 	return 0;
 
-out:
+out_mdiobus:
 	mdiobus_free(mdio_bus);
+
+out_clk:
+	if (dev->of_node)
+		clk_disable_unprepare(pdata->clk);
 
 	return ret;
 }
