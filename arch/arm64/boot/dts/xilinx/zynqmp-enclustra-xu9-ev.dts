@@ -1,5 +1,5 @@
 /*
- * dts file for Enclustra XU5 SOM
+ * dts file for Enclustra XU9 SOM
  *
  * (C) Copyright 2018, Xilinx, Inc.
  * (C) Copyright 2020, Enclustra
@@ -9,8 +9,8 @@
  * published by the Free Software Foundation; either version 2 of
  * the License, or (at your option) any later version.
  */
-
-#include "zynqmp-enclustra-xu5.dts"
+ 
+#include "zynqmp-enclustra-xu9.dts"
 
 / {
 	amba_pl: amba_pl@0 {
