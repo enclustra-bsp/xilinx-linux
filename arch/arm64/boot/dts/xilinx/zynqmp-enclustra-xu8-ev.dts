@@ -24,7 +24,7 @@
 			#clock-cells = <0x1>;
 			#size-cells = <0x2>;
 			clock-names = "pll_ref", "aclk", "vcu_core_enc", "vcu_core_dec", "vcu_mcu_enc", "vcu_mcu_dec";
-			clocks = <&misc_clk_0>, <&clk 71>, <&vcu_0 1>, <&vcu_0 2>, <&vcu_0 3>, <&vcu_0 4>;
+			clocks = <&misc_clk_0>, <&zynqmp_clk 71>, <&vcu_0 1>, <&vcu_0 2>, <&vcu_0 3>, <&vcu_0 4>;
 			compatible = "xlnx,vcu-1.2", "xlnx,vcu";
 			interrupt-names = "vcu_host_interrupt";
 			interrupt-parent = <&gic>;
