@@ -2,7 +2,7 @@
 #
 # Makefile for the Atmel network device drivers.
 #
-macb-y	:= macb_main.o macb_mdio.o
+macb-y	:= macb_main.o
 
 ifeq ($(CONFIG_MACB_USE_HWSTAMP),y)
 macb-y	+= macb_ptp.o

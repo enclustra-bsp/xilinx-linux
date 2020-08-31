@@ -1179,7 +1179,7 @@ struct ethtool_rx_fs_list {
 struct macb {
 	void __iomem		*regs;
 	bool			native_io;
-	int			phy_irq;
+
 	/* hardware IO accessors */
 	u32	(*macb_reg_readl)(struct macb *bp, int offset);
 	void	(*macb_reg_writel)(struct macb *bp, int offset, u32 value);
