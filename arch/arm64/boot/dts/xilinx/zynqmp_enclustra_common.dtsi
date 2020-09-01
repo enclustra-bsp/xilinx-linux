@@ -1,0 +1,91 @@
+#include <dt-bindings/gpio/gpio.h>
+
+&gpu {
+	status = "okay";
+};
+
+&serdes {
+	status = "okay";
+};
+
+&rtc {
+	status = "okay";
+};
+
+&fpd_dma_chan1 {
+	status = "okay";
+};
+
+&fpd_dma_chan2 {
+	status = "okay";
+};
+
+&fpd_dma_chan3 {
+	status = "okay";
+};
+
+&fpd_dma_chan4 {
+	status = "okay";
+};
+
+&fpd_dma_chan5 {
+	status = "okay";
+};
+
+&fpd_dma_chan6 {
+	status = "okay";
+};
+
+&fpd_dma_chan7 {
+	status = "okay";
+};
+
+&fpd_dma_chan8 {
+	status = "okay";
+};
+
+&gem0 {
+	status = "okay";
+	local-mac-address = [00 0a 35 00 02 90];
+	phy = <&phy0>;
+	phy-mode = "rgmii-id";
+	phy-handle = <&phy0>;
+	phy0: phy@3 {
+		reg = <3>;
+
+		txc-skew-ps = <1800>;
+		txen-skew-ps = <420>;
+
+		txd0-skew-ps = <420>;
+		txd1-skew-ps = <420>;
+		txd2-skew-ps = <420>;
+		txd3-skew-ps = <420>;
+
+		rxc-skew-ps = <900>;
+		rxdv-skew-ps = <420>;
+
+		rxd0-skew-ps = <420>;
+		rxd1-skew-ps = <420>;
+		rxd2-skew-ps = <420>;
+		rxd3-skew-ps = <420>;		
+	};
+};
+
+&i2c0 {
+	status = "okay";
+	clock-frequency = <400000>;
+	scl-gpios = <&gpio 10 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpio 11 GPIO_ACTIVE_HIGH>;
+};
+
+&sdhci0 {
+	status = "okay";
+	non-removable;
+	disable-wp;
+	xlnx,mio_bank = <0>;
+	bus-width = <8>;
+};
+
+&uart0 {
+	status = "okay";
+};

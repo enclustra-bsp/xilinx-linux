@@ -1,0 +1,41 @@
+/ {
+	aliases {
+		ethernet0 = &gem0;
+		ethernet1 = &gem1;
+		i2c0 = &i2c0;
+		serial0 = &uart0;
+		spi0 = &qspi;
+	};
+
+    chosen {
+		bootargs = "earlycon";
+		stdout-path = "serial0:115200n8";
+	};
+};
+
+&gem1 {
+	status = "okay";
+	local-mac-address = [00 0a 35 00 02 91];
+	phy = <&phy1>;
+	phy-mode = "gmii-id";
+	phy-handle = <&phy1>;
+    	phy1: phy@3 {
+		reg = <3>;
+
+		txc-skew-ps = <1800>;
+		txen-skew-ps = <420>;
+
+		txd0-skew-ps = <420>;
+		txd1-skew-ps = <420>;
+		txd2-skew-ps = <420>;
+		txd3-skew-ps = <420>;
+
+		rxc-skew-ps = <900>;
+		rxdv-skew-ps = <420>;
+
+		rxd0-skew-ps = <420>;
+		rxd1-skew-ps = <420>;
+		rxd2-skew-ps = <420>;
+		rxd3-skew-ps = <420>;		
+	};
+};
