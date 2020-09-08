@@ -6,11 +6,6 @@
 		serial0 = &uart0;
 		spi0 = &qspi;
 	};
-
-    chosen {
-		bootargs = "earlycon";
-		stdout-path = "serial0:115200n8";
-	};
 };
 
 &gem1 {
