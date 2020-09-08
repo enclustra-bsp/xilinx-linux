@@ -22,7 +22,7 @@
     	phy1: phy@3 {
 		reg = <3>;
 
-		txc-skew-ps = <1800>;
+		txc-skew-ps = <900>;
 		txen-skew-ps = <420>;
 
 		txd0-skew-ps = <420>;
@@ -30,7 +30,7 @@
 		txd2-skew-ps = <420>;
 		txd3-skew-ps = <420>;
 
-		rxc-skew-ps = <900>;
+		rxc-skew-ps = <1680>;
 		rxdv-skew-ps = <420>;
 
 		rxd0-skew-ps = <420>;

@@ -89,3 +89,15 @@
 &uart0 {
 	status = "okay";
 };
+
+&xilinx_ams {
+	status = "okay";
+};
+
+&ams_ps {
+	status = "okay";
+};
+
+&ams_pl {
+	status = "okay";
+};
