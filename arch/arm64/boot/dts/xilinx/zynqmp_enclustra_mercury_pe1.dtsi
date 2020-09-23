@@ -1,3 +1,5 @@
+#include <dt-bindings/clock/clk-si5338.h>
+
 &usb0 {
 	status = "okay";
 };
@@ -28,11 +30,11 @@
 	xlnx,mio_bank = <1>;
 };
 
-&amba_pl {
-	ref24: ref24M {
+&amba {
+	ref100: ref100M {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
-		clock-frequency = <24000000>;
+		clock-frequency = <100000000>;
 	};
 };
 
@@ -44,7 +46,7 @@
 		#size-cells = <0>;
 		#clock-cells = <1>;
 
-		clocks = <0>, <0>, <&ref24>, <0>, <0>;
+		clocks = <0>, <0>, <&ref100>, <0>, <0>;
 		clock-names = "xtal", "in12", "in3", "in4", "in56";
 
 		silab,ref-source = <SI5338_REF_SRC_CLKIN3>;
