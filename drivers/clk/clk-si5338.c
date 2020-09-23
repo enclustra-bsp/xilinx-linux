@@ -2949,8 +2949,8 @@ static int register_debugfs_status(struct si5338_hw_data *clkout)
 {
 	struct dentry *d;
 
-	d = clk_debugfs_add_file(&clkout->hw, "output_status", S_IRUGO,
-				clkout, &clkout_status_fops);
+	d = debugfs_create_file("output_status", S_IRUGO, d, clkout,
+				&clkout_status_fops);
 	if (!d)
 		return -ENOMEM;
 
