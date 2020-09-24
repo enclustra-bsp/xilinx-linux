@@ -73,7 +73,7 @@
 
 &i2c0 {
 	status = "okay";
-	clock-frequency = <400000>;
+	clock-frequency = <100000>;
 	scl-gpios = <&gpio 10 GPIO_ACTIVE_HIGH>;
 	sda-gpios = <&gpio 11 GPIO_ACTIVE_HIGH>;
 };
