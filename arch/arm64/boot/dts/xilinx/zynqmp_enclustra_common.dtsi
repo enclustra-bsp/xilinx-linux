@@ -44,36 +44,13 @@
 	status = "okay";
 };
 
-&gem0 {
+&gpio {
 	status = "okay";
-	local-mac-address = [00 0a 35 00 02 90];
-	phy = <&phy0>;
-	phy-mode = "rgmii-id";
-	phy-handle = <&phy0>;
-	phy0: phy@3 {
-		reg = <3>;
-
-		txc-skew-ps = <1800>;
-		txen-skew-ps = <420>;
-
-		txd0-skew-ps = <420>;
-		txd1-skew-ps = <420>;
-		txd2-skew-ps = <420>;
-		txd3-skew-ps = <420>;
-
-		rxc-skew-ps = <900>;
-		rxdv-skew-ps = <420>;
-
-		rxd0-skew-ps = <420>;
-		rxd1-skew-ps = <420>;
-		rxd2-skew-ps = <420>;
-		rxd3-skew-ps = <420>;		
-	};
 };
 
 &i2c0 {
 	status = "okay";
-	clock-frequency = <400000>;
+	clock-frequency = <100000>;
 	scl-gpios = <&gpio 10 GPIO_ACTIVE_HIGH>;
 	sda-gpios = <&gpio 11 GPIO_ACTIVE_HIGH>;
 };
