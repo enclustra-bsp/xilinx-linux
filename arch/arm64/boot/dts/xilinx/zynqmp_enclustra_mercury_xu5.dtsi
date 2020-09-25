@@ -11,7 +11,6 @@
 &gem0 {
 	status = "okay";
 	local-mac-address = [00 0a 35 00 02 90];
-	phy = <&phy0>;
 	phy-mode = "rgmii-id";
 	phy-handle = <&phy0>;
 	phy0: phy@3 {
@@ -38,7 +37,6 @@
 &gem1 {
 	status = "okay";
 	local-mac-address = [00 0a 35 00 02 91];
-	phy = <&phy1>;
 	phy-mode = "gmii-id";
 	phy-handle = <&phy1>;
     	phy1: phy@3 {

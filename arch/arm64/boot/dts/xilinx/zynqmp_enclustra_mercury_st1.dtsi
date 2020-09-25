@@ -94,10 +94,6 @@
 	};
 };
 
-&serdes {
-	status = "okay";
-};
-
 &xlnx_dpdma {
 	status = "okay";
 };
