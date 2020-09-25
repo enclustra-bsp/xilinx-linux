@@ -4,11 +4,16 @@
 #include "zynqmp_enclustra_mercury_xu5.dtsi"
 
 / {
-	model = "Enclustra XU5-3EG-2I-D11E SOM";
+	model = "Enclustra XU5-2CG-1E-D10H SOM";
 
 	memory {
 		device_type = "memory";
 		reg = <0x0 0x0 0x0 0x3ff00000>;
+	};
+
+	cpus {
+		/delete-node/ cpu@2 ;
+		/delete-node/ cpu@3 ;
 	};
 
 /******************** PL entries **********************/

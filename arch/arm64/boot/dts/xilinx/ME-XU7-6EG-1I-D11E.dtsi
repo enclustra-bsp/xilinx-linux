@@ -1,20 +1,16 @@
 #include "zynqmp.dtsi"
 #include "zynqmp-clk-ccf.dtsi"
 #include "zynqmp_enclustra_common.dtsi"
-#include "zynqmp_enclustra_mercury_xu8.dtsi"
+#include "zynqmp_enclustra_mercury_xu7.dtsi"
 
 / {
-	model = "Enclustra XU8-4CG-1E-D11E SOM";
+	model = "Enclustra XU7-6EG-1E-D11E SOM";
 
 	memory {
 		device_type = "memory";
 		reg = <0x0 0x0 0x0 0x7ff00000>;
 	};
 
-	cpus {
-		/delete-node/ cpu@2 ;
-		/delete-node/ cpu@3 ;
-	};
 
 /******************** PL entries **********************/
 

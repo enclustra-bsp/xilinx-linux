@@ -11,6 +11,10 @@
 		reg = <0x0 0x0 0x0 0x7ff00000>;
 	};
 
+	cpus {
+		/delete-node/ cpu@2 ;
+		/delete-node/ cpu@3 ;
+	};
 
 /******************** PL entries **********************/
 
