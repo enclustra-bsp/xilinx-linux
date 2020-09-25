@@ -5,21 +5,21 @@
 };
 
 &usb1 {
-	status = "okay";
+	status = "disabled";
 };
 
 &dwc3_0 {
 	status = "okay";
 	dr_mode = "host";
 	snps,usb3_lpm_capable;
-	maximum-speed = "super-speed";
+	maximum-speed = "high-speed";
 };
 
 &dwc3_1 {
-	status = "okay";
+	status = "disabled";
 	dr_mode = "host";
 	snps,usb3_lpm_capable;
-	maximum-speed = "super-speed";
+	maximum-speed = "high-speed";
 };
 
 /* SD1 with level shifter */
@@ -31,10 +31,10 @@
 };
 
 &amba {
-	ref100: ref100M {
+	ref24: ref24M {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
-		clock-frequency = <100000000>;
+		clock-frequency = <24000000>;
 	};
 };
 
@@ -46,7 +46,7 @@
 		#size-cells = <0>;
 		#clock-cells = <1>;
 
-		clocks = <0>, <0>, <&ref100>, <0>, <0>;
+		clocks = <0>, <0>, <&ref24>, <0>, <0>;
 		clock-names = "xtal", "in12", "in3", "in4", "in56";
 
 		silab,ref-source = <SI5338_REF_SRC_CLKIN3>;
@@ -60,6 +60,7 @@
 			silabs,clock-source = <SI5338_OUT_MUX_MSN>;
 			silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
 			clock-frequency = <125000000>;
+			/* enabled = "okay"; */
 		};
 		clkout1 {
 			reg = <1>;
@@ -67,6 +68,7 @@
 			silabs,clock-source = <SI5338_OUT_MUX_MSN>;
 			silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
 			clock-frequency = <125000000>;
+			/* enabled = "okay"; */
 		};
 		clkout2 {
 			reg = <2>;
@@ -74,6 +76,7 @@
 			silabs,clock-source = <SI5338_OUT_MUX_MSN>;
 			silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
 			clock-frequency = <125000000>;
+			/* enabled = "okay"; */
 		};
 		clkout3 {
 			reg = <3>;
@@ -81,6 +84,7 @@
 			silabs,clock-source = <SI5338_OUT_MUX_MSN>;
 			silabs,disable-state = <SI5338_OUT_DIS_HIZ>;
 			clock-frequency = <125000000>;
+			/* enabled = "okay"; */
 		};
 	};
 };
