@@ -33,9 +33,3 @@
 	dma-names = "vid0", "vid1", "vid2", "gfx0";
 	dmas = <&xlnx_dpdma 0>, <&xlnx_dpdma 1>, <&xlnx_dpdma 2>, <&xlnx_dpdma 3>;
 };
-
-/* emio I2C for HDMI */
-&i2c1 {
-	status = "okay";
-	clock-frequency = <100000>;
-};
