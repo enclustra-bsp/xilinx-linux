@@ -56,7 +56,7 @@
 		#size-cells = <0x1>;
 		compatible = "s25fl512s";
 		reg = <0x0>;
-		spi-tx-bus-width = <0x4>;
+		spi-tx-bus-width = <0x1>;
 		spi-rx-bus-width = <0x4>;
 		spi-max-frequency = <0x2faf080>;
 	};
@@ -67,6 +67,10 @@
 	clock-frequency = <100000>;
 	scl-gpios = <&gpio 10 GPIO_ACTIVE_HIGH>;
 	sda-gpios = <&gpio 11 GPIO_ACTIVE_HIGH>;
+	atsha204a@64 {
+		compatible = "atmel,atsha204a";
+		reg = <0x0 0x64>;
+	};
 };
 
 &sdhci0 {
