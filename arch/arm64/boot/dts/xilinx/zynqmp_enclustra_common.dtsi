@@ -68,8 +68,8 @@
 	scl-gpios = <&gpio 10 GPIO_ACTIVE_HIGH>;
 	sda-gpios = <&gpio 11 GPIO_ACTIVE_HIGH>;
 	atsha204a@64 {
-		compatible = "atmel,atsha204a";
-		reg = <0x0 0x64>;
+		compatible = "atmel,atsha204a", "atmel,atsha204-i2c";
+		reg = <0x64>;
 	};
 };
 
