@@ -20,6 +20,7 @@
 	no-1-8-v;	/* for 1.0 silicon */
 	wp-inverted;
 	xlnx,mio_bank = <1>;
+	max-frequency = <25000000>;
 };
 
 &xlnx_dpdma {
