@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ *  Copyright (C) 2020 Enclustra GmbH
+ *
+ * This software is licensed under the terms of the GNU General Public
+ * License version 2, as published by the Free Software Foundation, and
+ * may be copied, distributed, and modified under those terms.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
+
+/ {
+	chosen {
+		bootargs = "console=ttyPS0,115200 earlycon root=/dev/mmcblk0p2 rw rootfstype=ext4 rootwait";
+		stdout-path = "serial0:115200n8";
+	};
+
+	aliases {
+		ethernet0 = &gem0;
+		serial0 = &uart0;
+		mmc0 = &sdhci0;
+        spi0 = &qspi;
+	};
+};
+
+&gem0 {
+	status = "okay";
+	local-mac-address = [00 0a 35 00 02 90];
+	phy = <&phy0>;
+	phy-mode = "rgmii-id";
+
+	phy0: ethernet-phy@3 {
+	    reg = <3>;
+
+	    txc-skew-ps = <1800>;
+	    txen-skew-ps = <420>;
+
+	    txd0-skew-ps = <420>;
+	    txd1-skew-ps = <420>;
+	    txd2-skew-ps = <420>;
+	    txd3-skew-ps = <420>;
+
+	    rxc-skew-ps = <900>;
+	    rxdv-skew-ps = <420>;
+
+	    rxd0-skew-ps = <420>;
+	    rxd1-skew-ps = <420>;
+	    rxd2-skew-ps = <420>;
+	    rxd3-skew-ps = <420>;
+	};
+
+};
+
+&i2c0 {
+	status = "okay";
+	clock-frequency = <100000>;
+
+	atsha204a@64 {
+		compatible = "atmel,atsha204a", "atmel,atsha204-i2c";
+		reg = <0x64>;
+	};
+};
+
+&sdhci0 {
+   	u-boot,dm-pre-reloc;
+	status = "okay";
+	xlnx,has-cd = <0x0>;
+	xlnx,has-power = <0x0>;
+	xlnx,has-wp = <0x0>;
+};
+
+/* SD1 with level shifter */
+&sdhci1 {
+	status = "okay";
+	no-1-8-v;	/* for 1.0 silicon */
+	wp-inverted;
+	xlnx,mio_bank = <1>;
+};
+
+&uart0 {
+	u-boot,dm-pre-reloc;
+	status = "okay";
+	cts-override ;
+	device_type = "serial";
+	port-number = <0>;
+};
+
+&usb0 {
+	status = "okay";
+	phy_type = "ulpi";
+	dr_mode = "host";
+};
