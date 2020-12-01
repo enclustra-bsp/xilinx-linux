@@ -1,0 +1,3 @@
+&sdhci0 {
+	max-frequency = <26000000>;
+};
