@@ -17,6 +17,9 @@
 	arm,nand-cycle-t5 = <0x2>;
 	arm,nand-cycle-t6 = <0x4>;
 
+	nand-ecc-mode = "on-die";
+	nand-bus-width = <0x8>;
+
 	partition@nand-linux {
 		label = "nand-linux";
 		reg = <0x0 0x500000>;

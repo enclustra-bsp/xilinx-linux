@@ -50,22 +50,10 @@
 	};
 };
 
-&sdhci0 {
-	u-boot,dm-pre-reloc;
-	status = "okay";
-	disable-wp;
-};
-
 &uart0 {
 	u-boot,dm-pre-reloc;
 	status = "okay";
 	cts-override ;
 	device_type = "serial";
 	port-number = <0>;
-};
-
-&usb0 {
-	status = "okay";
-	phy_type = "ulpi";
-	dr_mode = "host";
 };
