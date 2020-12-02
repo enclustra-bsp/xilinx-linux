@@ -9,7 +9,7 @@
 
 &gem3 {
 	status = "okay";
-	local-mac-address = [00 0a 35 00 02 90];
+	/delete-property/ local-mac-address;
 	phy-mode = "rgmii-id";
 	phy-handle = <&phy3>;
 	phy3: phy@3 {
