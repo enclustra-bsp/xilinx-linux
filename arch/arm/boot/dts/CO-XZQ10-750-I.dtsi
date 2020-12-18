@@ -1,0 +1,62 @@
+#include "zynq-7000.dtsi"
+#include "zynq_enclustra_common.dtsi"
+#include "zynq_enclustra_cosmos_xzq10.dtsi"
+
+/ {
+	model = "Enclustra XZQ10-750-I";
+
+	chosen {
+		bootargs = "console=ttyPS0,115200 earlycon root=/dev/mmcblk0p2 rw rootwait";
+		stdout-path = "serial0:115200n8";
+	};
+
+	aliases {
+		ethernet0 = &gem0;
+		i2c0 = &i2c0;
+		serial0 = &uart0;
+		spi0 = &qspi;
+	};
+
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x40000000>;
+	};
+
+/******************** PL entries **********************/
+
+	amba_pl: amba_pl {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "simple-bus";
+		ranges ;
+
+		SDRAM: mig_7series@80000000 {
+			compatible = "xlnx,mig-7series-4.2";
+			reg = <0x80000000 0x10000000>;
+		};
+
+		led: gpio@41200000 {
+			#gpio-cells = <3>;
+			clock-names = "s_axi_aclk";
+			clocks = <&clkc 15>;
+			compatible = "xlnx,axi-gpio-2.0", "xlnx,xps-gpio-1.00.a";
+			gpio-controller ;
+			reg = <0x41200000 0x10000>;
+			xlnx,all-inputs = <0x0>;
+			xlnx,all-inputs-2 = <0x0>;
+			xlnx,all-outputs = <0x1>;
+			xlnx,all-outputs-2 = <0x0>;
+			xlnx,dout-default = <0x00000001>;
+			xlnx,dout-default-2 = <0x00000000>;
+			xlnx,gpio-width = <0x1>;
+			xlnx,gpio2-width = <0x20>;
+			xlnx,interrupt-present = <0x0>;
+			xlnx,is-dual = <0x0>;
+			xlnx,tri-default = <0xFFFFFFFF>;
+			xlnx,tri-default-2 = <0xFFFFFFFF>;
+		};
+	};
+
+/******************** PL entries **********************/
+
+};
