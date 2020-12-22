@@ -34,3 +34,19 @@
 	dma-names = "vid0", "vid1", "vid2", "gfx0";
 	dmas = <&xlnx_dpdma 0>, <&xlnx_dpdma 1>, <&xlnx_dpdma 2>, <&xlnx_dpdma 3>;
 };
+
+&zynqmp_dp_snd_pcm0 {
+    status = "disabled";
+};
+
+&zynqmp_dp_snd_pcm1 {
+    status = "disabled";
+};
+
+&zynqmp_dp_snd_card0 {
+    status = "disabled";
+};
+
+&zynqmp_dp_snd_codec0 {
+    status = "disabled";
+};
