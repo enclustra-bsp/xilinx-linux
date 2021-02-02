@@ -1208,16 +1208,7 @@ dtb-$(CONFIG_ARCH_ZYNQ) += \
 	zynq-zc770-xm011.dtb \
 	zynq-zc770-xm012.dtb \
 	zynq-zc770-xm013.dtb \
-	zynq-mars-zx2.dtb \
-	zynq-mars-zx3-sta.dtb \
-	zynq-mars-zx3-sta-nand.dtb \
-	zynq-mars-zx3.dtb \
-	zynq-mars-zx3-nand.dtb \
-	zynq-mercury-zx1.dtb \
-	zynq-mercury-zx1-nand.dtb \
-	zynq-mercury-zx5.dtb \
-	zynq-mercury-zx5-nand.dtb \
-	zynq-cosmos-xzq10.dtb \
+	enclustra-generated.dtb \
 	zynq-zed.dtb \
 	zynq-zturn.dtb \
 	zynq-zybo.dtb \
