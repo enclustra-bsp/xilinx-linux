@@ -2,6 +2,13 @@
 	status = "okay";
 };
 
+&dwc3_0 {
+	status = "okay";
+	dr_mode = "host";
+	snps,usb3_lpm_capable;
+	maximum-speed = "super-speed";
+};
+
 /* SD1 with level shifter */
 &sdhci1 {
 	status = "okay";
