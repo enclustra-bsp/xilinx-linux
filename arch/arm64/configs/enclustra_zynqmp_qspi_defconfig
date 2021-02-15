@@ -1,3 +1,4 @@
+CONFIG_I2C=y
 # CONFIG_CAN_XILINXCAN is not set
 # CONFIG_PCI is not set
 # CONFIG_PCIE_XILINX_NWL is not set
