@@ -38,7 +38,7 @@
 			xlnx,tri-default = <0xFFFFFFFF>;
 			xlnx,tri-default-2 = <0xFFFFFFFF>;
 		};
-	}:
+	};
 
 /******************** PL entries **********************/
 
