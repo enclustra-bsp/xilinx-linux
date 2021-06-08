@@ -4578,6 +4578,8 @@ static int spi_nor_parse_sfdp(struct spi_nor *nor,
 	struct sfdp_parameter_header *param_headers = NULL;
 	struct sfdp_header header;
 	struct device *dev = nor->dev;
+	struct device_node *np = spi_nor_get_flash_node(nor);
+	struct device_node *np_spi;
 	size_t psize;
 	int i, err;
 
@@ -4655,6 +4657,11 @@ static int spi_nor_parse_sfdp(struct spi_nor *nor,
 			break;
 
 		case SFDP_4BAIT_ID:
+#ifdef CONFIG_OF
+			np_spi = of_get_next_parent(np);
+			if (of_property_match_string(np_spi, "compatible",
+						     "xlnx,zynq-qspi-1.0") < 0)
+#endif
 			err = spi_nor_parse_4bait(nor, param_header, params);
 			break;
 
