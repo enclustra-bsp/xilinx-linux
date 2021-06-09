@@ -60,6 +60,8 @@
 		reg = <0x0>;
 		compatible = "spansion,s25fl512s", "jedec,spi-nor";
 		spi-max-frequency = <50000000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
 	};
 };
 

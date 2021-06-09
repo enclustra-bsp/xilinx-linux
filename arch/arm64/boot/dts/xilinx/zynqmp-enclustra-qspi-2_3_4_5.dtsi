@@ -1,6 +1,4 @@
 &flash0 {
-	#address-cells = <1>;
-	#size-cells = <1>;
 	partition@qspi-bootimage {
 		label = "qspi-bootimage";
 		reg = <0x00000000 0x00900000>;
