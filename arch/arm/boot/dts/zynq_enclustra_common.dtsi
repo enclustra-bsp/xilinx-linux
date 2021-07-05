@@ -74,3 +74,8 @@
 	device_type = "serial";
 	port-number = <0>;
 };
+
+&clkc {
+	fclk-enable = <0x3>;
+	ps-clk-frequency = <33333333>;
+};
