@@ -10,7 +10,7 @@
 	dr_mode = "host";
 	snps,usb3_lpm_capable;
 	phy-names = "usb3-phy";
-	phys = <&lane2 PHY_TYPE_USB3 0 2 100000000>;
+	phys = <&psgtr 2 PHY_TYPE_USB3 0 2>;
 	maximum-speed = "super-speed";
 };
 
@@ -23,16 +23,17 @@
 	max-frequency = <26000000>;
 };
 
-&xlnx_dpdma {
+&zynqmp_dpdma {
 	status = "okay";
 };
 
 &zynqmp_dpsub {
 	status = "okay";
 	phy-names = "dp-phy0", "dp-phy1";
-	phys = <&lane1 PHY_TYPE_DP 0x0 0x3 27000000>, <&lane0 PHY_TYPE_DP 0x1 0x3 27000000>;
+	phys = <&psgtr 1 PHY_TYPE_DP 0 3>, <&psgtr 0 PHY_TYPE_DP 1 3>;
 	dma-names = "vid0", "vid1", "vid2", "gfx0";
-	dmas = <&xlnx_dpdma 0>, <&xlnx_dpdma 1>, <&xlnx_dpdma 2>, <&xlnx_dpdma 3>;
+	dmas = <&zynqmp_dpdma 0>, <&zynqmp_dpdma 1>, <&zynqmp_dpdma 2>,
+	<&zynqmp_dpdma 3>;
 };
 
 &zynqmp_dp_snd_pcm0 {
