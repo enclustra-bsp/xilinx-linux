@@ -4,23 +4,8 @@
 	status = "okay";
 };
 
-&psgtr {
+&serdes {
 	status = "okay";
-	clocks = <&ref100>, <&ref27>;
-	clock-names = "ref2", "ref3";
-};
-
-&amba {
-	ref100: ref100M {
-		compatible = "fixed-clock";
-		#clock-cells = <0>;
-		clock-frequency = <100000000>;
-	};
-	ref27: ref27M {
-		compatible = "fixed-clock";
-		#clock-cells = <0>;
-		clock-frequency = <27000000>;
-	};
 };
 
 &rtc {
