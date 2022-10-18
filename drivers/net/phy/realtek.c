@@ -38,6 +38,11 @@
 #define RTL8211F_ALDPS_ENABLE			BIT(2)
 #define RTL8211F_ALDPS_XTAL_OFF			BIT(12)
 
+#define RTL8211F_SW_RESET			BIT(15)
+
+#define RTL8211F_CENTER_TAP_SHORT		BIT(6)
+#define RTL8211F_CENTER_TAP_NOT_SHORT      	0
+
 #define RTL8211E_CTRL_DELAY			BIT(13)
 #define RTL8211E_TX_DELAY			BIT(12)
 #define RTL8211E_RX_DELAY			BIT(11)
@@ -78,6 +83,7 @@ MODULE_LICENSE("GPL");
 struct rtl821x_priv {
 	u16 phycr1;
 	u16 phycr2;
+	u8 center_tap;
 };
 
 static int rtl821x_read_page(struct phy_device *phydev)
@@ -115,6 +121,14 @@ static int rtl821x_probe(struct phy_device *phydev)
 	priv->phycr2 = ret & RTL8211F_CLKOUT_EN;
 	if (of_property_read_bool(dev->of_node, "realtek,clkout-disable"))
 		priv->phycr2 &= ~RTL8211F_CLKOUT_EN;
+
+	priv->center_tap = RTL8211F_CENTER_TAP_SHORT;
+
+	if (of_property_read_bool(dev->of_node, "realtek,center-tap-short"))
+		priv->center_tap = RTL8211F_CENTER_TAP_SHORT;
+
+	else if (of_property_read_bool(dev->of_node, "realtek,center-tap-not-short"))
+		priv->center_tap = RTL8211F_CENTER_TAP_NOT_SHORT;
 
 	phydev->priv = priv;
 
@@ -406,6 +420,27 @@ static int rtl8211f_config_init(struct phy_device *phydev)
 		dev_err(dev, "clkout configuration failed: %pe\n",
 			ERR_PTR(ret));
 		return ret;
+	}
+
+	ret = phy_modify_paged_changed(phydev, 0xa43, 0x25, RTL8211F_CENTER_TAP_SHORT,
+				       priv->center_tap);
+		
+	if (ret < 0) {
+		dev_err(dev, "Failed to update the center tap register\n");
+		return ret;
+	} else if (ret) {
+		ret = phy_modify_paged(phydev, 0x0, 0x0, RTL8211F_SW_RESET, RTL8211F_SW_RESET);
+
+		if (ret < 0) {
+			dev_err(dev, "Failed to update the center tap register\n");
+			return ret;
+		} else {			
+			dev_dbg(dev,
+				"Center tap configuration updated\n");
+		}
+	} else {
+		dev_dbg(dev,
+			"Center tap register was already set correctly\n");
 	}
 
 	return genphy_soft_reset(phydev);
