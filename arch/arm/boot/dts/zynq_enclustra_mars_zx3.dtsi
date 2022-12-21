@@ -1,0 +1,8 @@
+// The isl12022 driver is used for the ISL12020M
+&i2c0 {
+	isl12022: isl12022@6f {
+		status = "okay";
+		compatible = "isil,isl12022";
+		reg = <0x6f>;
+	};
+};

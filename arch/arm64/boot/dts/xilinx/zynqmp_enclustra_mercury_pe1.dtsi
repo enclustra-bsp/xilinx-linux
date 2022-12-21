@@ -1,0 +1,46 @@
+
+&usb0 {
+	status = "okay";
+};
+
+&usb1 {
+	status = "disabled";
+};
+
+&dwc3_0 {
+	status = "okay";
+	dr_mode = "host";
+	snps,usb3_lpm_capable;
+	maximum-speed = "high-speed";
+};
+
+&dwc3_1 {
+	status = "disabled";
+	dr_mode = "host";
+	snps,usb3_lpm_capable;
+	maximum-speed = "high-speed";
+};
+
+/* SD1 with level shifter */
+&sdhci1 {
+	status = "okay";
+	no-1-8-v;	/* for 1.0 silicon */
+	wp-inverted;
+	xlnx,mio_bank = <1>;
+};
+
+&amba {
+	ref24: ref24M {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+	};
+};
+
+&i2c0 {	
+	lm96080@2f {
+		status = "okay";
+		compatible = "lm80";
+		reg = <0x2f >;
+	};
+};

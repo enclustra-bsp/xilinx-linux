@@ -1,0 +1,18 @@
+&flash0 {
+	partition@qspi-bootimage {
+		label = "qspi-bootimage";
+		reg = <0x00000000 0x1f00000>;
+	};
+	partition@qspi-bootenv {
+		label = "qspi-bootenv";
+		reg = <0x1f00000 0x80000>;
+	};
+	partition@qspi-bootscr {
+		label = "qspi-bootscr";
+		reg = <0x1f80000 0x80000>;
+	};
+	partition@qspi-fitimage {
+		label = "qspi-fitimage";
+		reg = <0x2000000 0x2000000>;
+	};
+};

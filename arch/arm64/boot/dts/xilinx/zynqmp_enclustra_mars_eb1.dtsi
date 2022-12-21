@@ -1,0 +1,26 @@
+&usb0 {
+	status = "okay";
+};
+
+&dwc3_0 {
+	status = "okay";
+	dr_mode = "host";
+	snps,usb3_lpm_capable;
+	maximum-speed = "super-speed";
+};
+
+/* SD1 with level shifter */
+&sdhci1 {
+	status = "okay";
+	no-1-8-v;	/* for 1.0 silicon */
+	wp-inverted;
+	xlnx,mio_bank = <1>;
+};
+
+&i2c0 {	
+	lm96080@2f {
+		status = "okay";
+		compatible = "lm80";
+		reg = <0x2f >;
+	};
+};

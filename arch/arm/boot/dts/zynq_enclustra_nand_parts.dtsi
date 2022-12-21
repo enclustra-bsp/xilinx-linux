@@ -1,0 +1,29 @@
+&smcc {
+	status = "okay";
+};
+
+&nfc0 {
+	status = "okay";
+
+	nand-ecc-mode = "on-die";
+	nand-bus-width = <0x8>;
+
+	nand@0 {
+		reg = <0>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@nand-linux {
+			label = "nand-linux";
+			reg = <0x0 0x2000000>;
+		};
+		partition@nand-bootscript {
+			label = "nand-bootscript";
+			reg = <0x2000000 0x100000>;
+		};
+		partition@nand-rootfs {
+			label = "nand-rootfs";
+			reg = <0x2100000 0x1DF00000>;
+		};
+	};
+};

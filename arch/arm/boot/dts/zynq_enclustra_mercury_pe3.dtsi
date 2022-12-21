@@ -1,0 +1,67 @@
+
+/ {
+	usb_phy0: phy0 {
+		compatible = "ulpi-phy";
+		#phy-cells = <0>;
+		reg = <0xe0002000 0x1000>;
+		view-port = <0x0170>;
+		drv-vbus;
+	};
+};
+
+&usb0 {
+	status = "okay";
+	dr_mode = "host";
+	usb-phy = <&usb_phy0>;
+};
+
+&sdhci0 {
+        u-boot,dm-pre-reloc;
+        status = "okay";
+        disable-wp;
+};
+
+&amba {
+	ref100: ref100M {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <100000000>;
+	};
+};
+
+&i2c0 {
+	i2c_mux@74 {
+		compatible = "nxp,pca9547";
+		reg = <0x74>;
+
+		i2c_mux@0 {
+			reg = <0>;
+
+			lm96080@2f {
+			  	   status = "okay";
+				   compatible = "lm80";
+				   reg = <0x2f >;
+			};
+		};
+
+		i2c_mux@1 {
+			reg = <1>;
+
+			i2c_mux@75 {
+				   compatible = "nxp,pca9547";
+				   reg = <0x75>;
+
+			};
+		};
+	};
+};
+
+
+&i2c1 {
+	status = "okay";
+	clock-frequency = <100000>;
+	i2c_mux@75 {
+		compatible = "nxp,pca9547";
+		reg = <0x75>;
+	};
+};

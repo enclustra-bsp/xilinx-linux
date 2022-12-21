@@ -1,0 +1,108 @@
+#include <dt-bindings/phy/phy.h>
+
+&usb0 {
+	status = "okay";
+};
+
+&usb1 {
+	status = "disabled";
+};
+
+&dwc3_0 {
+	status = "okay";
+	dr_mode = "host";
+	snps,usb3_lpm_capable;
+	phy-names = "usb3-phy";
+	phys = <&psgtr 2 PHY_TYPE_USB3 0 2>;
+	maximum-speed = "super-speed";
+};
+
+&dwc3_1 {
+	status = "disabled";
+	dr_mode = "host";
+	snps,usb3_lpm_capable;
+	phy-names = "usb3-phy";
+	phys = <&psgtr 3 PHY_TYPE_USB3 1 2>;
+	maximum-speed = "super-speed";
+};
+
+/* SD1 with level shifter */
+&sdhci1 {
+	status = "okay";
+	no-1-8-v;	/* for 1.0 silicon */
+	wp-inverted;
+	xlnx,mio_bank = <1>;
+};
+
+&amba {
+	ref100: ref100M {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <100000000>;
+	};
+};
+
+&i2c0 {
+	i2c_mux@74 {
+		compatible = "nxp,pca9547";
+		reg = <0x74>;
+
+		i2c_mux@0 {
+			reg = <0>;
+
+			lm96080@2f {
+				   status = "okay";
+				   compatible = "lm80";
+				   reg = <0x2f >;
+			};
+		};
+
+		i2c_mux@1 {
+			reg = <1>;
+
+			i2c_mux@75 {
+				   compatible = "nxp,pca9547";
+				   reg = <0x75>;
+
+			};
+		};
+	};
+};
+
+
+&i2c1 {
+	status = "okay";
+	clock-frequency = <100000>;
+	i2c_mux@75 {
+		compatible = "nxp,pca9547";
+		reg = <0x75>;
+	};
+};
+
+&sata {
+	status = "disabled";
+	ceva,p0-cominit-params = /bits/ 8 <0x18 0x40 0x18 0x28>;
+	ceva,p0-comwake-params = /bits/ 8 <0x06 0x14 0x08 0x0E>;
+	ceva,p0-burst-params = /bits/ 8 <0x13 0x08 0x4A 0x06>;
+	ceva,p0-retry-params = /bits/ 16 <0x96A4 0x3FFC>;
+	ceva,p1-cominit-params = /bits/ 8 <0x18 0x40 0x18 0x28>;
+	ceva,p1-comwake-params = /bits/ 8 <0x06 0x14 0x08 0x0E>;
+	ceva,p1-burst-params = /bits/ 8 <0x13 0x08 0x4A 0x06>;
+	ceva,p1-retry-params = /bits/ 16 <0x96A4 0x3FFC>;
+};
+
+&zynqmp_dp_snd_pcm0 {
+    status = "okay";
+};
+
+&zynqmp_dp_snd_pcm1 {
+    status = "okay";
+};
+
+&zynqmp_dp_snd_card0 {
+    status = "okay";
+};
+
+&zynqmp_dp_snd_codec0 {
+    status = "okay";
+};

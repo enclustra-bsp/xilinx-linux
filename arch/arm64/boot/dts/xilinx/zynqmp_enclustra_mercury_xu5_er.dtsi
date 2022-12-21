@@ -1,0 +1,33 @@
+/ {
+	aliases {
+		ethernet0 = &gem0;
+		ethernet1 = &gem1;
+		i2c0 = &i2c0;
+		serial0 = &uart0;
+		spi0 = &qspi;
+	};
+};
+
+&gem0 {
+	status = "okay";
+	/delete-property/ local-mac-address;
+	phy-mode = "rgmii-id";
+	phy-handle = <&phy0>;
+	phy0: phy@1 {
+		reg = <1>;
+
+	    	realtek,center-tap-not-short;		
+	};
+};
+
+&gem1 {
+	status = "okay";
+	/delete-property/ local-mac-address;
+	phy-mode = "gmii";
+	phy-handle = <&phy1>;
+    	phy1: phy@1 {
+		reg = <1>;
+
+	    	realtek,center-tap-not-short;		
+	};
+};

@@ -1,0 +1,21 @@
+#include "zynqmp.dtsi"
+#include "zynqmp-clk-ccf.dtsi"
+#include "zynqmp_enclustra_common.dtsi"
+#include "zynqmp_enclustra_mercury_xu1.dtsi"
+
+/ {
+	model = "Enclustra ME-XU1-6EG-1I-D11E SOM";
+
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x0 0x0 0x7ff00000>;
+	};
+
+
+/******************** PL entries **********************/
+
+/* empty */
+	
+/******************** PL entries **********************/
+
+};
