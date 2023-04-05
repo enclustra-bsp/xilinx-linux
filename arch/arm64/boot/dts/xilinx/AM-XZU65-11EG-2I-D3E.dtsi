@@ -1,0 +1,30 @@
+#include "zynqmp.dtsi"
+#include "zynqmp-clk-ccf.dtsi"
+#include "zynqmp_enclustra_common.dtsi"
+#include "zynqmp_enclustra_andromeda_xzu65.dtsi"
+
+/ {
+	model = "Enclustra AM-XZU65-11EG-2I-D3E SOM";
+
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x0 0x0 0x7ff00000>, <0x8 0x0 0x0 0x80000000>;
+	};
+
+
+/******************** PL entries **********************/
+
+	amba_pl: amba_pl@0 {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		compatible = "simple-bus";
+		ranges ;
+		ddr4: ddr4@400000000 {
+			compatible = "xlnx,ddr4-2.2";
+			reg = <0x4 0x0 0x1 0x0>;
+		};
+	};
+	
+/******************** PL entries **********************/
+
+};
