@@ -1,9 +1,9 @@
 / {
-    model = "Enclustra ME-XU61-2CG-L1I-D9-NU SOM";
+    model = "Enclustra ME-XU61-2EG-L1I4524-D11-NU SOM";
 
     memory {
         device_type = "memory";
-        reg = <0x0 0x0 0x0 0x1ff00000>;
+        reg = <0x0 0x0 0x0 0x7ff00000>;
     };
 
     cpus {

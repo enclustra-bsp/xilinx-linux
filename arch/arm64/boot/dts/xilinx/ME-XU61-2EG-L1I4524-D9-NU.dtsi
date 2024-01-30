@@ -1,5 +1,5 @@
 / {
-    model = "Enclustra ME-XU61-2EG-L1I-D9-NU SOM";
+    model = "Enclustra ME-XU61-2EG-L1I4524-D9-NU SOM";
 
     memory {
         device_type = "memory";
