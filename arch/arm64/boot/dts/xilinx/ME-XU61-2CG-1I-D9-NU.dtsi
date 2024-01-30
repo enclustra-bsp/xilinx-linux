@@ -1,0 +1,27 @@
+/ {
+    model = "Enclustra ME-XU61-2CG-1I-D9-NU SOM";
+
+    memory {
+        device_type = "memory";
+        reg = <0x0 0x0 0x0 0x1ff00000>;
+    };
+
+    cpus {
+        /delete-node/ cpu@2 ;
+        /delete-node/ cpu@3 ;
+    };
+};
+
+&usb0{
+    status = "disabled";
+};
+
+&usb1{
+    status = "disabled";
+};
+
+/******************** PL entries **********************/
+
+/* empty */
+
+/******************** PL entries **********************/

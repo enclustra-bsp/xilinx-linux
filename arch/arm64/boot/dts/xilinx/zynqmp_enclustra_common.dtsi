@@ -42,16 +42,6 @@
 	status = "okay";
 };
 
-&i2c0 {
-	status = "okay";
-	clock-frequency = <100000>;
-	atsha204a@64 {
-		status = "okay";
-		compatible = "atmel,atsha204a", "atmel,atsha204-i2c";
-		reg = <0x64>;
-	};
-};
-
 &sdhci0 {
 	status = "okay";
 	non-removable;

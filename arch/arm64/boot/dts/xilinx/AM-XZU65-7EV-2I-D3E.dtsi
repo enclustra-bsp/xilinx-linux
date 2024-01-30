@@ -1,8 +1,3 @@
-#include "zynqmp.dtsi"
-#include "zynqmp-clk-ccf.dtsi"
-#include "zynqmp_enclustra_common.dtsi"
-#include "zynqmp_enclustra_andromeda_xzu65.dtsi"
-
 / {
 	model = "Enclustra AM-XZU65-7EV-2I-D3E SOM";
 

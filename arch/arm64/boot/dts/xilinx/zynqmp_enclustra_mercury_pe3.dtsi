@@ -42,7 +42,7 @@
 	};
 };
 
-&i2c0 {
+&i2c_mgmt {
 	i2c_mux@74 {
 		compatible = "nxp,pca9547";
 		reg = <0x74>;
@@ -70,7 +70,7 @@
 };
 
 
-&i2c1 {
+&i2c_user {
 	status = "okay";
 	clock-frequency = <100000>;
 	i2c_mux@75 {

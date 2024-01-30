@@ -2,7 +2,8 @@
 	aliases {
 		ethernet0 = &gem0;
 		ethernet1 = &gem3;
-		i2c0 = &i2c0;
+		i2c0 = &i2c_mgmt;
+		i2c1 = &i2c_user;
 		serial0 = &uart0;
 		spi0 = &qspi;
 	};
@@ -94,5 +95,15 @@
 		#clock-cells = <0>;
 		clock-frequency = <27000000>;
 	};
+	i2c_mgmt: i2c@ff020000 {
+		status = "okay";
+		clock-frequency = <100000>;
+		atsha204a@64 {
+			status = "okay";
+			compatible = "atmel,atsha204a", "atmel,atsha204-i2c";
+			reg = <0x64>;
+		};
+	};
+	i2c_user: i2c@ff030000 {};
 };
 

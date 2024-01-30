@@ -37,7 +37,7 @@
 	};
 };
 
-&i2c0 {	
+&i2c_mgmt {	
 	lm96080@2f {
 		status = "okay";
 		compatible = "lm80";

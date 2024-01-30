@@ -1,8 +1,3 @@
-#include "zynqmp.dtsi"
-#include "zynqmp-clk-ccf.dtsi"
-#include "zynqmp_enclustra_common.dtsi"
-#include "zynqmp_enclustra_mars_xu3.dtsi"
-
 / {
     model = "Enclustra XU3-2EG-1I-D10 SOM";
 

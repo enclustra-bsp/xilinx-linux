@@ -1,0 +1,27 @@
+/ {
+    model = "Enclustra ME-XU61-5CG-1E-D11 SOM";
+
+    memory {
+        device_type = "memory";
+        reg = <0x0 0x0 0x0 0x7ff00000>;
+    };
+
+    cpus {
+        /delete-node/ cpu@2 ;
+        /delete-node/ cpu@3 ;
+    };
+};
+
+&usb0{
+    status = "okay";
+};
+
+&usb1{
+    status = "okay";
+};
+
+/******************** PL entries **********************/
+
+/* empty */
+
+/******************** PL entries **********************/

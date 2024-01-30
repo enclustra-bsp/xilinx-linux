@@ -1,8 +1,3 @@
-#include "zynqmp.dtsi"
-#include "zynqmp-clk-ccf.dtsi"
-#include "zynqmp_enclustra_common.dtsi"
-#include "zynqmp_enclustra_mercury_xu6.dtsi"
-
 / {
 	model = "Enclustra XU6-5EV-2I-D12E SOM";
 
